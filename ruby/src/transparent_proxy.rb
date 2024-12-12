@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
-require 'socket'
-require 'uri'
-require 'openssl'
+require "socket"
+require "uri"
+require "openssl"
 
 class TransparentProxy
   def initialize(port:, target_host:, target_port:)
@@ -35,9 +35,9 @@ class TransparentProxy
   # Example interceptors
   def self.image_replacer
     lambda do |data, type|
-      if type == :response && data.include?('Content-Type: image/')
+      if type == :response && data.include?("Content-Type: image/")
         # Replace all images with a placeholder
-        File.read('/path/to/placeholder.jpg')
+        File.read("/path/to/placeholder.jpg")
       else
         data
       end
@@ -48,7 +48,7 @@ class TransparentProxy
     lambda do |data, type|
       if type == :request
         # Inject custom headers
-        data.gsub(/\r\n\r\n/, "\r\nX-Proxy-Timestamp: #{Time.now.iso8601}\r\n\r\n")
+        data.gsub("\r\n\r\n", "\r\nX-Proxy-Timestamp: #{Time.now.iso8601}\r\n\r\n")
       else
         data
       end
@@ -58,8 +58,8 @@ end
 
 # Usage example
 proxy = TransparentProxy.new(
-  port: 8080, 
-  target_host: 'example.com', 
+  port: 8080,
+  target_host: "example.com",
   target_port: 80
 )
 

@@ -24,7 +24,7 @@ impl ProxyTestConfig {
     fn test_connection(&self) -> Result<(), Box<dyn std::error::Error>> {
         // Bind a temporary listener to simulate server
         let server_listener = TcpListener::bind(format!("127.0.0.1:{}", self.target_port))?;
-        
+
         // Spawn server thread
         let server_thread = thread::spawn(move || {
             for stream in server_listener.incoming() {
@@ -70,7 +70,7 @@ impl ProxyTestConfig {
         let duration = start.elapsed();
         println!(
             "Throughput Test: {} requests in {:.2?}",
-            ITERATIONS, 
+            ITERATIONS,
             duration
         );
 
@@ -89,7 +89,7 @@ mod tests {
     fn test_proxy_connection() {
         let test_config = ProxyTestConfig::new(
             8081,           // Proxy listen port
-            "localhost".to_string(), 
+            "localhost".to_string(),
             8082            // Target server port
         );
 
@@ -101,7 +101,7 @@ mod tests {
     fn test_proxy_throughput() {
         let test_config = ProxyTestConfig::new(
             8083,           // Proxy listen port
-            "localhost".to_string(), 
+            "localhost".to_string(),
             8084            // Target server port
         );
 
