@@ -1,6 +1,6 @@
 // tests/proxy_tests.rs
-use std::net::{TcpListener, TcpStream};
 use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
@@ -32,7 +32,9 @@ impl ProxyTestConfig {
                     Ok(mut socket) => {
                         let mut buffer = [0; 1024];
                         socket.read(&mut buffer).unwrap();
-                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello").unwrap();
+                        socket
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello")
+                            .unwrap();
                     }
                     Err(e) => eprintln!("Server error: {}", e),
                 }
@@ -70,8 +72,7 @@ impl ProxyTestConfig {
         let duration = start.elapsed();
         println!(
             "Throughput Test: {} requests in {:.2?}",
-            ITERATIONS,
-            duration
+            ITERATIONS, duration
         );
 
         // Basic performance assertion (adjust threshold as needed)
@@ -88,24 +89,28 @@ mod tests {
     #[test]
     fn test_proxy_connection() {
         let test_config = ProxyTestConfig::new(
-            8081,           // Proxy listen port
+            8081, // Proxy listen port
             "localhost".to_string(),
-            8082            // Target server port
+            8082, // Target server port
         );
 
         // Run connection test
-        test_config.test_connection().expect("Connection test failed");
+        test_config
+            .test_connection()
+            .expect("Connection test failed");
     }
 
     #[test]
     fn test_proxy_throughput() {
         let test_config = ProxyTestConfig::new(
-            8083,           // Proxy listen port
+            8083, // Proxy listen port
             "localhost".to_string(),
-            8084            // Target server port
+            8084, // Target server port
         );
 
         // Run throughput test
-        test_config.test_throughput().expect("Throughput test failed");
+        test_config
+            .test_throughput()
+            .expect("Throughput test failed");
     }
 }
