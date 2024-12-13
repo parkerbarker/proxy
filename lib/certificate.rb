@@ -8,24 +8,16 @@ class Certificate
   CERT_DIR = File.join(Dir.pwd, "certs")
   Dir.mkdir(CERT_DIR) unless File.exist?(CERT_DIR)
 
-  DEFAULT_CA_CONFIG = {
+  DEFAULT_FOLDER_PATH = "certs/CA"
+  DEFUALT_CONFIG = {
     hostname: "ca",
     domainname: "mitm.proxy",
     password: "password",
-    CA_dir: File.join(Dir.pwd, "certs/CA"),
-    keypair_file: File.join(Dir.pwd, "certs/CA", "private/cakeypair.pem"),
-    cert_file: File.join(Dir.pwd, "certs/CA", "cacert.pem"),
-    serial_file: File.join(Dir.pwd, "certs/CA", "serial"),
-    new_certs_dir: File.join(Dir.pwd, "certs/CA", "newcerts"),
-    new_keypair_dir: File.join(Dir.pwd, "certs/CA", "private/keypair_backup"),
-    crl_dir: File.join(Dir.pwd, "certs/CA", "crl"),
     ca_cert_days: 5 * 365,
     ca_rsa_key_length: 2048,
     cert_days: 365,
     cert_key_length_min: 1024,
     cert_key_length_max: 2048,
-    crl_file: File.join(Dir.pwd, "certs/CA", "crl", "ca.crl"),
-    crl_pem_file: File.join(Dir.pwd, "certs/CA", "crl", "ca.pem"),
     crl_days: 14,
     name: [
       ["C", "US", OpenSSL::ASN1::PRINTABLESTRING],
@@ -39,8 +31,10 @@ class Certificate
   # Authority described in +ca_config+.  If there is no CA at
   # ca_config[:CA_dir], then Certificate will initialize a new one.
 
-  def initialize(ca_config = {})
-    @ca_config = DEFAULT_CA_CONFIG.merge(ca_config)
+  attr_reader :config, :certificate_authority
+  def initialize(config = {})
+    file_paths = file_path_configuration(config[:path])
+    @config = DEFUALT_CONFIG.merge(file_paths).merge(config)
 
     create_ca
   end
@@ -77,28 +71,28 @@ class Certificate
   end
 
   ##
-  # Creates a new Certificate Authority from @ca_config if it
+  # Creates a new Certificate Authority from @config if it
   # does not already exist at ca_config[:CA_dir].
 
   def create_ca
-    return if File.exist? @ca_config[:CA_dir]
+    return if File.exist? @config[:CA_dir]
 
-    Dir.mkdir @ca_config[:CA_dir]
+    Dir.mkdir @config[:CA_dir]
 
-    Dir.mkdir File.join(@ca_config[:CA_dir], "private"), 0o700
-    Dir.mkdir File.join(@ca_config[:CA_dir], "newcerts")
-    Dir.mkdir File.join(@ca_config[:CA_dir], "crl")
+    Dir.mkdir File.join(@config[:CA_dir], "private"), 0o700
+    Dir.mkdir File.join(@config[:CA_dir], "newcerts")
+    Dir.mkdir File.join(@config[:CA_dir], "crl")
 
-    File.open @ca_config[:serial_file], "w" do |f| f << "#{Time.now.to_i}" end
+    File.open @config[:serial_file], "w" do |f| f << "#{Time.now.to_i}" end
 
     puts "Generating CA keypair" if $DEBUG
-    keypair = OpenSSL::PKey::RSA.new @ca_config[:ca_rsa_key_length]
+    keypair = OpenSSL::PKey::RSA.new @config[:ca_rsa_key_length]
 
     cert = OpenSSL::X509::Certificate.new
-    name = @ca_config[:name].dup << ["CN", "CA"]
+    name = @config[:name].dup << ["CN", "CA"]
     cert.subject = cert.issuer = OpenSSL::X509::Name.new(name)
     cert.not_before = Time.now
-    cert.not_after = Time.now + @ca_config[:ca_cert_days] * 24 * 60 * 60
+    cert.not_after = Time.now + @config[:ca_cert_days] * 24 * 60 * 60
     cert.public_key = keypair.public_key
     cert.serial = 0x0
     cert.version = 2 # X509v3
@@ -116,15 +110,15 @@ class Certificate
       "keyid:always,issuer:always")
     cert.sign(keypair, OpenSSL::Digest.new("SHA256"))
 
-    keypair_export = keypair.export(OpenSSL::Cipher.new("des-ede3-cbc"), @ca_config[:password])
+    keypair_export = keypair.export(OpenSSL::Cipher.new("des-ede3-cbc"), @config[:password])
 
-    puts "Writing keypair to #{@ca_config[:keypair_file]}" if $DEBUG
-    File.open @ca_config[:keypair_file], "w", 0o400 do |fp|
+    puts "Writing keypair to #{@config[:keypair_file]}" if $DEBUG
+    File.open @config[:keypair_file], "w", 0o400 do |fp|
       fp << keypair_export
     end
 
-    puts "Writing cert to #{@ca_config[:cert_file]}" if $DEBUG
-    File.open @ca_config[:cert_file], "w", 0o644 do |f|
+    puts "Writing cert to #{@config[:cert_file]}" if $DEBUG
+    File.open @config[:cert_file], "w", 0o644 do |f|
       f << cert.to_pem
     end
 
@@ -172,7 +166,7 @@ class Certificate
     dest = cert_config[:hostname] || cert_config[:user]
     csr_file = "#{CERT_DIR}/#{dest}/csr_#{dest}.pem"
 
-    name = @ca_config[:name].dup
+    name = @config[:name].dup
     case cert_config[:type]
     when "server"
       name << ["OU", "CA"]
@@ -215,15 +209,15 @@ class Certificate
 
     raise "CSR sign verification failed." unless csr.verify csr.public_key
 
-    if csr.public_key.n.num_bits < @ca_config[:cert_key_length_min]
+    if csr.public_key.n.num_bits < @config[:cert_key_length_min]
       raise "Key length too short"
     end
 
-    if csr.public_key.n.num_bits > @ca_config[:cert_key_length_max]
+    if csr.public_key.n.num_bits > @config[:cert_key_length_max]
       raise "Key length too long"
     end
 
-    if csr.subject.to_a[0, @ca_config[:name].size] != @ca_config[:name]
+    if csr.subject.to_a[0, @config[:name].size] != @config[:name]
       raise "DN does not match"
     end
 
@@ -232,15 +226,15 @@ class Certificate
 
     # CA setup
 
-    puts "Reading CA cert from #{@ca_config[:cert_file]}" if $DEBUG
-    ca = OpenSSL::X509::Certificate.new File.read(@ca_config[:cert_file])
+    puts "Reading CA cert from #{@config[:cert_file]}" if $DEBUG
+    ca = OpenSSL::X509::Certificate.new File.read(@config[:cert_file])
 
-    puts "Reading CA keypair from #{@ca_config[:keypair_file]}" if $DEBUG
-    ca_keypair = OpenSSL::PKey::RSA.new File.read(@ca_config[:keypair_file]),
-      @ca_config[:password]
+    puts "Reading CA keypair from #{@config[:keypair_file]}" if $DEBUG
+    ca_keypair = OpenSSL::PKey::RSA.new File.read(@config[:keypair_file]),
+      @config[:password]
 
-    serial = File.read(@ca_config[:serial_file]).chomp.hex
-    File.open @ca_config[:serial_file], "w" do |f|
+    serial = File.read(@config[:serial_file]).chomp.hex
+    File.open @config[:serial_file], "w" do |f|
       f << "%04X" % (serial + 1)
     end
 
@@ -251,7 +245,7 @@ class Certificate
     cert.subject = csr.subject
     cert.issuer = ca.subject
     cert.not_before = from
-    cert.not_after = from + @ca_config[:cert_days] * 24 * 60 * 60
+    cert.not_after = from + @config[:cert_days] * 24 * 60 * 60
     cert.public_key = csr.public_key
     cert.serial = serial
     cert.version = 2 # X509v3
@@ -304,14 +298,14 @@ class Certificate
       ex << ef.create_extension("extendedKeyUsage", ext_key_usage.join(","))
     end
 
-    if @ca_config[:cdp_location]
+    if @config[:cdp_location]
       ex << ef.create_extension("crlDistributionPoints",
-        @ca_config[:cdp_location])
+        @config[:cdp_location])
     end
 
-    if @ca_config[:ocsp_location]
+    if @config[:ocsp_location]
       ex << ef.create_extension("authorityInfoAccess",
-        "OCSP;" << @ca_config[:ocsp_location])
+        "OCSP;" << @config[:ocsp_location])
     end
 
     unless alt_names.empty?
@@ -321,7 +315,7 @@ class Certificate
     cert.extensions = ex
     cert.sign(ca_keypair, OpenSSL::Digest.new("SHA256"))
 
-    backup_cert_file = @ca_config[:new_certs_dir] + "/cert_#{cert.serial}.pem"
+    backup_cert_file = @config[:new_certs_dir] + "/cert_#{cert.serial}.pem"
     puts "Writing backup cert to #{backup_cert_file}" if $DEBUG
     File.open backup_cert_file, "w", 0o644 do |f|
       f << cert.to_pem
@@ -336,5 +330,21 @@ class Certificate
     end
 
     [cert_file, cert]
+  end
+
+  private
+
+  def file_path_configuration(folder_path = DEFAULT_FOLDER_PATH)
+    {
+      CA_dir: File.join(Dir.pwd, folder_path),
+      keypair_file: File.join(Dir.pwd, folder_path, "private/cakeypair.pem"),
+      cert_file: File.join(Dir.pwd, folder_path, "cacert.pem"),
+      serial_file: File.join(Dir.pwd, folder_path, "serial"),
+      new_certs_dir: File.join(Dir.pwd, folder_path, "newcerts"),
+      new_keypair_dir: File.join(Dir.pwd, folder_path, "private/keypair_backup"),
+      crl_dir: File.join(Dir.pwd, folder_path, "crl"),
+      crl_file: File.join(Dir.pwd, folder_path, "crl", "ca.crl"),
+      crl_pem_file: File.join(Dir.pwd, folder_path, "crl", "ca.pem"),
+    }
   end
 end # class Certificate

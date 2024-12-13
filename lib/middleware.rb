@@ -24,7 +24,7 @@ class Middleware < Proxy
   def start(host, port)
     return @mitm_servers[host].config[:Port] if @mitm_servers[host]
 
-    cert, key = create_self_signed_cert host
+    cert, key = @ca.create_self_signed_cert(host)
     agent_config = config.merge(
       MITMProxyServer: self,
       SSLEnable: true,

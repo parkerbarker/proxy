@@ -2,7 +2,7 @@ require "proxy"
 RSpec.describe Proxy do
   before :all do
     @server_thread = Thread.new do
-      @server = Proxy.new Port: 3128, Quiet: true
+      @server = Proxy.new Port: 3156, Quiet: true
       @server.start
     end
 
@@ -16,7 +16,7 @@ RSpec.describe Proxy do
   end
 
   let(:proxy_host) { "127.0.0.1" }
-  let(:proxy_port) { 3128 }
+  let(:proxy_port) { 3156 }
 
   describe "http" do
     it "proxies GET requests" do
