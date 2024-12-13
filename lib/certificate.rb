@@ -1,50 +1,55 @@
 require "openssl"
+require "logger"
 
 class Certificate
-  ##
-  # Certificate Version
-
-  VERSION = "1.0.2"
-  CERT_DIR = File.join(Dir.pwd, "certs")
-  Dir.mkdir(CERT_DIR) unless File.exist?(CERT_DIR)
-
   DEFAULT_FOLDER_PATH = "certs/CA"
   DEFUALT_CONFIG = {
     hostname: "ca",
-    domainname: "mitm.proxy",
-    password: "password",
-    ca_cert_days: 5 * 365,
+    domainname: "pb.proxy",
+    password: ENV.fetch("CA_PASSWORD") { SecureRandom.hex(16) },
+    ca_cert_days: 2 * 365,
     ca_rsa_key_length: 2048,
-    cert_days: 365,
-    cert_key_length_min: 1024,
-    cert_key_length_max: 2048,
+    cert_days: 398,
+    cert_key_length_min: 2048,
+    cert_key_length_max: 3072,
     crl_days: 14,
     name: [
       ["C", "US", OpenSSL::ASN1::PRINTABLESTRING],
-      ["O", "mitm.proxy", OpenSSL::ASN1::UTF8STRING],
-      ["OU", "ca", OpenSSL::ASN1::UTF8STRING]
+      ["O", "pb.proxy", OpenSSL::ASN1::UTF8STRING],
+      ["OU", "ca", OpenSSL::ASN1::UTF8STRING],
+      ["CN", "pb.proxy", OpenSSL::ASN1::UTF8STRING]
     ]
   }
 
   ##
   # Creates a new Certificate instance using the Certificate
-  # Authority described in +ca_config+.  If there is no CA at
-  # ca_config[:CA_dir], then Certificate will initialize a new one.
+  # Authority described in +config+.  If there is no CA at
+  # config[:CA_dir], then Certificate will initialize a new one.
 
-  attr_reader :config, :certificate_authority
-  def initialize(config = {})
-    file_paths = file_path_configuration(config[:path])
-    @config = DEFUALT_CONFIG.merge(file_paths).merge(config)
+  attr_reader :config
+  def initialize(config = {}, cert_directory: "certs")
+    @cert_directory = File.join(Dir.pwd, cert_directory)
+    Dir.mkdir(@cert_directory, 0o700) unless File.exist?(@cert_directory)
+
+    ca_files = config_CA_files
+    @config = DEFUALT_CONFIG
+      .merge(ca_files)
+      .merge(config)
+
+    @logger = Logger.new(STDOUT)
+    @logger.level = Logger::INFO
 
     create_ca
   end
 
-  def create_self_signed_cert host
+  private
+
+  def create_self_signed_cert(host)
     cn = [["C", "US"], ["O", host], ["CN", host]]
     name = OpenSSL::X509::Name.new(cn)
     hostname = name.to_s.scan(/CN=([\w.]+)/)[0][0]
 
-    logger.info "Create cert for #{hostname}"
+    @logger.info "Create cert for #{hostname}"
     cert_config = {type: "server", hostname: hostname}
     _, cert, key = ca.create_cert(cert_config)
 
@@ -57,8 +62,8 @@ class Certificate
 
   def create_cert(cert_config)
     dest = cert_config[:hostname] || cert_config[:user]
-    key_file = "#{CERT_DIR}/#{dest}/#{dest}_keypair.pem"
-    cert_file = "#{CERT_DIR}/#{dest}/cert_#{dest}.pem"
+    key_file = "#{@cert_directory}/#{dest}/#{dest}_keypair.pem"
+    cert_file = "#{@cert_directory}/#{dest}/cert_#{dest}.pem"
     if File.exist?(cert_file) && File.exist?(key_file)
       key = OpenSSL::PKey::RSA.new(File.read(key_file))
       cert = OpenSSL::X509::Certificate.new(File.read(cert_file))
@@ -72,57 +77,75 @@ class Certificate
 
   ##
   # Creates a new Certificate Authority from @config if it
-  # does not already exist at ca_config[:CA_dir].
+  # does not already exist at config[:CA_dir].
 
   def create_ca
-    return if File.exist? @config[:CA_dir]
+    validate_config!
 
-    Dir.mkdir @config[:CA_dir]
+    initialize_serial_file
 
-    Dir.mkdir File.join(@config[:CA_dir], "private"), 0o700
-    Dir.mkdir File.join(@config[:CA_dir], "newcerts")
-    Dir.mkdir File.join(@config[:CA_dir], "crl")
+    @logger.info("Generating CA keypair")
+    keypair = OpenSSL::PKey::RSA.new(@config[:ca_rsa_key_length])
 
-    File.open @config[:serial_file], "w" do |f| f << "#{Time.now.to_i}" end
+    cert = generate_certificate(keypair)
 
-    puts "Generating CA keypair" if $DEBUG
-    keypair = OpenSSL::PKey::RSA.new @config[:ca_rsa_key_length]
+    export_keypair(keypair)
+    write_certificate(cert)
 
+    @logger.info("Done generating certificate for #{cert.subject}")
+  end
+
+  def validate_config!
+    required_keys = [:serial_file, :keypair_file, :cert_file, :ca_cert_days, :password]
+    missing_keys = required_keys.select { |key| @config[key].nil? }
+    raise "Missing required config keys: #{missing_keys.join(", ")}" unless missing_keys.empty?
+  end
+
+  def initialize_serial_file
+    File.open(@config[:serial_file], "w", 0o600) do |f|
+      f << SecureRandom.random_number(2**128)
+    end
+  end
+
+  def generate_certificate(keypair)
     cert = OpenSSL::X509::Certificate.new
     name = @config[:name].dup << ["CN", "CA"]
     cert.subject = cert.issuer = OpenSSL::X509::Name.new(name)
     cert.not_before = Time.now
     cert.not_after = Time.now + @config[:ca_cert_days] * 24 * 60 * 60
     cert.public_key = keypair.public_key
-    cert.serial = 0x0
+    cert.serial = SecureRandom.random_number(2**128)
     cert.version = 2 # X509v3
 
+    # Initialize the extension factory with proper references
     ef = OpenSSL::X509::ExtensionFactory.new
     ef.subject_certificate = cert
     ef.issuer_certificate = cert
-    cert.extensions = [
-      ef.create_extension("basicConstraints", "CA:TRUE", true),
-      ef.create_extension("nsComment", "Ruby/OpenSSL Generated Certificate"),
-      ef.create_extension("subjectKeyIdentifier", "hash"),
-      ef.create_extension("keyUsage", "cRLSign,keyCertSign", true)
-    ]
-    cert.add_extension ef.create_extension("authorityKeyIdentifier",
-      "keyid:always,issuer:always")
-    cert.sign(keypair, OpenSSL::Digest.new("SHA256"))
 
-    keypair_export = keypair.export(OpenSSL::Cipher.new("des-ede3-cbc"), @config[:password])
+    # Add necessary extensions
+    cert.add_extension(ef.create_extension("basicConstraints", "CA:TRUE", true))
+    cert.add_extension(ef.create_extension("keyUsage", "cRLSign,keyCertSign", true))
+    # TODO: WHAT does this do?
+    # cert.add_extension(ef.create_extension("authorityKeyIdentifier", "keyid:always,issuer:always"))
 
-    puts "Writing keypair to #{@config[:keypair_file]}" if $DEBUG
-    File.open @config[:keypair_file], "w", 0o400 do |fp|
+    # Sign the certificate with the private key
+    cert.sign(keypair, OpenSSL::Digest.new("SHA512"))
+    cert
+  end
+
+  def export_keypair(keypair)
+    keypair_export = keypair.export(OpenSSL::Cipher.new("AES-256-CBC"), @config[:password])
+    @logger.info("Writing keypair to #{@config[:keypair_file]}")
+    File.open(@config[:keypair_file], "w", 0o600) do |fp|
       fp << keypair_export
     end
+  end
 
-    puts "Writing cert to #{@config[:cert_file]}" if $DEBUG
-    File.open @config[:cert_file], "w", 0o644 do |f|
+  def write_certificate(cert)
+    @logger.info("Writing cert to #{@config[:cert_file]}")
+    File.open(@config[:cert_file], "w", 0o644) do |f|
       f << cert.to_pem
     end
-
-    puts "Done generating certificate for #{cert.subject}" if $DEBUG
   end
 
   ##
@@ -130,30 +153,35 @@ class Certificate
 
   def create_key(cert_config)
     dest = cert_config[:hostname] || cert_config[:user]
-    keypair_file = "#{CERT_DIR}/#{dest}/#{dest}_keypair.pem"
+    keypair_file = File.join(@cert_directory, dest, "#{dest}_keypair.pem")
+
+    # Check if the keypair already exists
     if File.exist?(keypair_file)
-      keypair = OpenSSL::PKey::RSA.new(File.read(keypair_file),
-        cert_config[:password])
+      @logger.info("Loading existing keypair for #{dest}")
+      keypair = OpenSSL::PKey::RSA.new(File.read(keypair_file), cert_config[:password])
       return keypair_file, keypair
     end
-    Dir.mkdir("#{CERT_DIR}/#{dest}", 0o700) unless File.exist?("#{CERT_DIR}/#{dest}")
 
-    puts "Generating RSA keypair" if $DEBUG
-    keypair = OpenSSL::PKey::RSA.new 1024
+    # Ensures the directory exists and is secure
+    path = File.join(@cert_directory, dest)
+    Dir.mkdir(path, 0o700) unless File.exist?(path)
+    @logger.info("Created directory: #{path}")
 
-    if cert_config[:password].nil?
-      File.open keypair_file, "w", 0o400 do |f|
-        f << keypair.to_pem
-      end
+    # Generate a new keypair
+    key_length = cert_config[:key_length] || 2048
+    @logger.info("Generating RSA keypair (#{key_length} bits) for #{dest}")
+    keypair = OpenSSL::PKey::RSA.new(key_length)
+
+    # Writes the keypair to a file, encrypted if a password is provided
+    keypair_data = if password.nil?
+      keypair.to_pem
     else
-      keypair_export = keypair.export(OpenSSL::Cipher.new("des-ede3-cbc"),
-        cert_config[:password])
-
-      puts "Writing keypair to #{keypair_file}" if $DEBUG
-      File.open keypair_file, "w", 0o400 do |f|
-        f << keypair_export
-      end
+      keypair.export(OpenSSL::Cipher.new("AES-256-CBC"), password)
     end
+    File.open(file_path, "w", 0o400) do |f|
+      f << keypair_data
+    end
+    @logger.info("Keypair written to: #{file_path}")
 
     [keypair_file, keypair]
   end
@@ -164,8 +192,28 @@ class Certificate
 
   def create_csr(cert_config, keypair_file = nil)
     dest = cert_config[:hostname] || cert_config[:user]
-    csr_file = "#{CERT_DIR}/#{dest}/csr_#{dest}.pem"
+    cert_dir = cert_config[:cert_dir] || @cert_directory
+    csr_file = File.join(cert_dir, dest, "csr_#{dest}.pem")
 
+    ensure_directory(File.dirname(csr_file))
+
+    # Build the subject name based on cert_config
+    name = build_subject_name(cert_config)
+
+    # Retrieve or create the keypair
+    keypair = retrieve_or_create_keypair(cert_config, keypair_file)
+
+    # Generate the CSR
+    req = generate_csr(name, keypair)
+
+    # Write the CSR to file
+    write_csr(csr_file, req)
+
+    csr_file
+  end
+
+  # Builds the subject name for the CSR
+  def build_subject_name(cert_config)
     name = @config[:name].dup
     case cert_config[:type]
     when "server"
@@ -174,30 +222,38 @@ class Certificate
     when "client"
       name << ["CN", cert_config[:user]]
       name << ["emailAddress", cert_config[:email]]
-    end
-    name = OpenSSL::X509::Name.new name
-
-    keypair = if File.exist? keypair_file
-      OpenSSL::PKey::RSA.new(File.read(keypair_file),
-        cert_config[:password])
     else
-      create_key cert_config
+      raise "Unknown certificate type: #{cert_config[:type]}"
     end
+    OpenSSL::X509::Name.new(name)
+  end
 
-    puts "Generating CSR for #{name}" if $DEBUG
+  # Retrieves or creates the keypair
+  def retrieve_or_create_keypair(cert_config, keypair_file)
+    if keypair_file && File.exist?(keypair_file)
+      OpenSSL::PKey::RSA.new(File.read(keypair_file), cert_config[:password])
+    else
+      _, keypair = create_key(cert_config)
+      keypair
+    end
+  end
 
+  # Generates the CSR
+  def generate_csr(name, keypair)
     req = OpenSSL::X509::Request.new
     req.version = 0
     req.subject = name
     req.public_key = keypair.public_key
-    req.sign keypair, OpenSSL::Digest.new("MD5")
+    req.sign(keypair, OpenSSL::Digest.new("SHA256"))
+    req
+  end
 
-    puts "Writing CSR to #{csr_file}" if $DEBUG
-    File.open csr_file, "w" do |f|
+  # Writes the CSR to a file
+  def write_csr(file_path, req)
+    @logger.info("Writing CSR to #{file_path}")
+    File.open(file_path, "w", 0o644) do |f|
       f << req.to_pem
     end
-
-    csr_file
   end
 
   ##
@@ -205,146 +261,143 @@ class Certificate
   # +csr_file+, saving it to +cert_file+.
 
   def sign_cert(cert_config, cert_file, csr_file)
-    csr = OpenSSL::X509::Request.new File.read(csr_file)
+    csr = validate_csr(csr_file, cert_config)
 
-    raise "CSR sign verification failed." unless csr.verify csr.public_key
+    ca, ca_keypair = load_ca
 
-    if csr.public_key.n.num_bits < @config[:cert_key_length_min]
-      raise "Key length too short"
-    end
+    serial = next_serial
 
-    if csr.public_key.n.num_bits > @config[:cert_key_length_max]
-      raise "Key length too long"
+    cert = generate_certificate_sign_cert(csr, ca, ca_keypair, cert_config, serial)
+
+    backup_cert(cert)
+
+    dest = cert_config[:hostname] || cert_config[:user]
+    cert_file = write_cert(cert, dest)
+
+    [cert_file, cert]
+  end
+
+  # Validates the CSR and returns the parsed object
+  def validate_csr(csr_file, cert_config)
+    csr = OpenSSL::X509::Request.new(File.read(csr_file))
+    raise "CSR sign verification failed." unless csr.verify(csr.public_key)
+
+    key_bits = csr.public_key.n.num_bits
+    if key_bits < @config[:cert_key_length_min] || key_bits > @config[:cert_key_length_max]
+      raise "Invalid key length: #{key_bits} bits"
     end
 
     if csr.subject.to_a[0, @config[:name].size] != @config[:name]
       raise "DN does not match"
     end
 
-    # Only checks signature here.  You must verify CSR according to your
-    # CP/CPS.
+    csr
+  end
 
-    # CA setup
+  # Loads the CA certificate and keypair
+  def load_ca
+    ca = OpenSSL::X509::Certificate.new(File.read(@config[:cert_file]))
+    ca_keypair = OpenSSL::PKey::RSA.new(File.read(@config[:keypair_file]), @config[:password])
+    [ca, ca_keypair]
+  end
 
-    puts "Reading CA cert from #{@config[:cert_file]}" if $DEBUG
-    ca = OpenSSL::X509::Certificate.new File.read(@config[:cert_file])
-
-    puts "Reading CA keypair from #{@config[:keypair_file]}" if $DEBUG
-    ca_keypair = OpenSSL::PKey::RSA.new File.read(@config[:keypair_file]),
-      @config[:password]
-
+  # Generates the next serial number
+  def next_serial
     serial = File.read(@config[:serial_file]).chomp.hex
-    File.open @config[:serial_file], "w" do |f|
-      f << "%04X" % (serial + 1)
-    end
+    File.open(@config[:serial_file], "w", 0o600) { |f| f << "%04X" % (serial + 1) }
+    serial
+  end
 
-    puts "Generating cert" if $DEBUG
-
+  # Generates the certificate
+  def generate_certificate_sign_cert(csr, ca, ca_keypair, cert_config, serial)
     cert = OpenSSL::X509::Certificate.new
-    from = Time.now
     cert.subject = csr.subject
     cert.issuer = ca.subject
-    cert.not_before = from
-    cert.not_after = from + @config[:cert_days] * 24 * 60 * 60
+    cert.not_before = Time.now
+    cert.not_after = Time.now + @config[:cert_days] * 24 * 60 * 60
     cert.public_key = csr.public_key
     cert.serial = serial
     cert.version = 2 # X509v3
 
-    basic_constraint = nil
-    key_usage = []
-    ext_key_usage = []
-    alt_names = []
+    extensions = build_extensions(cert, ca, cert_config)
+    cert.extensions = extensions
+    cert.sign(ca_keypair, OpenSSL::Digest.new("SHA256"))
+    cert
+  end
 
-    case cert_config[:type]
-    when "ca"
-      basic_constraint = "CA:TRUE"
-      key_usage << "cRLSign" << "keyCertSign"
-    when "terminalsubca"
-      basic_constraint = "CA:TRUE,pathlen:0"
-      key_usage << "cRLSign" << "keyCertSign"
-    when "server"
-      basic_constraint = "CA:FALSE"
-      key_usage << "digitalSignature" << "keyEncipherment"
-      ext_key_usage << "serverAuth"
-      alt_names << "DNS: #{cert_config[:hostname]}"
-    when "ocsp"
-      basic_constraint = "CA:FALSE"
-      key_usage << "nonRepudiation" << "digitalSignature"
-      ext_key_usage << "serverAuth" << "OCSPSigning"
-    when "client"
-      basic_constraint = "CA:FALSE"
-      key_usage << "nonRepudiation" << "digitalSignature" << "keyEncipherment"
-      ext_key_usage << "clientAuth" << "emailProtection"
-    else
-      raise "unknown cert type \"#{cert_config[:type]}\""
-    end
-
+  # Builds the required extensions for the certificate
+  def build_extensions(cert, ca, cert_config)
     ef = OpenSSL::X509::ExtensionFactory.new
     ef.subject_certificate = cert
     ef.issuer_certificate = ca
-    ex = []
-    ex << ef.create_extension("basicConstraints", basic_constraint, true)
-    ex << ef.create_extension("nsComment",
-      "Ruby/OpenSSL Generated Certificate")
-    ex << ef.create_extension("subjectKeyIdentifier", "hash")
-    # ex << ef.create_extension("nsCertType", "client,email")
-    unless key_usage.empty?
-      ex << ef.create_extension("keyUsage", key_usage.join(","))
-    end
-    # ex << ef.create_extension("authorityKeyIdentifier",
-    #                          "keyid:always,issuer:always")
-    # ex << ef.create_extension("authorityKeyIdentifier", "keyid:always")
-    unless ext_key_usage.empty?
-      ex << ef.create_extension("extendedKeyUsage", ext_key_usage.join(","))
-    end
 
-    if @config[:cdp_location]
-      ex << ef.create_extension("crlDistributionPoints",
-        @config[:cdp_location])
-    end
-
-    if @config[:ocsp_location]
-      ex << ef.create_extension("authorityInfoAccess",
-        "OCSP;" << @config[:ocsp_location])
-    end
-
-    unless alt_names.empty?
-      ex << ef.create_extension("subjectAltName", alt_names.join(","))
-    end
-
-    cert.extensions = ex
-    cert.sign(ca_keypair, OpenSSL::Digest.new("SHA256"))
-
-    backup_cert_file = @config[:new_certs_dir] + "/cert_#{cert.serial}.pem"
-    puts "Writing backup cert to #{backup_cert_file}" if $DEBUG
-    File.open backup_cert_file, "w", 0o644 do |f|
-      f << cert.to_pem
-    end
-
-    # Write cert
-    dest = cert_config[:hostname] || cert_config[:user]
-    cert_file = "#{CERT_DIR}/#{dest}/cert_#{dest}.pem"
-    puts "Writing cert to #{cert_file}" if $DEBUG
-    File.open cert_file, "w", 0o644 do |f|
-      f << cert.to_pem
-    end
-
-    [cert_file, cert]
+    extensions = []
+    extensions << ef.create_extension("basicConstraints", (cert_config[:type] == "ca") ? "CA:TRUE" : "CA:FALSE", true)
+    extensions << ef.create_extension("keyUsage", key_usage_for_type(cert_config[:type]).join(","), true)
+    extensions << ef.create_extension("extendedKeyUsage", extended_key_usage_for_type(cert_config[:type]).join(","), false) unless cert_config[:type] == "ca"
+    extensions << ef.create_extension("subjectAltName", "DNS:#{cert_config[:hostname]}", false) if cert_config[:type] == "server"
+    extensions
   end
 
-  private
+  # Determines key usage based on certificate type
+  def key_usage_for_type(type)
+    case type
+    when "ca" then ["cRLSign", "keyCertSign"]
+    when "server" then ["digitalSignature", "keyEncipherment"]
+    when "client" then ["nonRepudiation", "digitalSignature", "keyEncipherment"]
+    else raise "Unknown cert type: #{type}"
+    end
+  end
 
-  def file_path_configuration(folder_path = DEFAULT_FOLDER_PATH)
+  # Determines extended key usage based on certificate type
+  def extended_key_usage_for_type(type)
+    case type
+    when "server" then ["serverAuth"]
+    when "client" then ["clientAuth", "emailProtection"]
+    when "ocsp" then ["OCSPSigning"]
+    else []
+    end
+  end
+
+  # Writes the certificate to a backup file
+  def backup_cert(cert)
+    backup_cert_file = File.join(@config[:new_certs_dir], "cert_#{cert.serial}.pem")
+    @logger.info("Writing backup cert to #{backup_cert_file}")
+    File.open(backup_cert_file, "w", 0o644) { |f| f << cert.to_pem }
+  end
+
+  # Writes the certificate to its final destination
+  def write_cert(cert, dest)
+    cert_file = File.join(@cert_directory, dest, "cert_#{dest}.pem")
+    ensure_directory(File.dirname(cert_file))
+    @logger.info("Writing cert to #{cert_file}")
+    File.open(cert_file, "w", 0o644) { |f| f << cert.to_pem }
+    cert_file
+  end
+
+  # Ensures the directory exists
+  def ensure_directory(path)
+    Dir.mkdir(path, 0o700) unless File.directory?(path)
+  end
+
+  def config_CA_files
     {
-      CA_dir: File.join(Dir.pwd, folder_path),
-      keypair_file: File.join(Dir.pwd, folder_path, "private/cakeypair.pem"),
-      cert_file: File.join(Dir.pwd, folder_path, "cacert.pem"),
-      serial_file: File.join(Dir.pwd, folder_path, "serial"),
-      new_certs_dir: File.join(Dir.pwd, folder_path, "newcerts"),
-      new_keypair_dir: File.join(Dir.pwd, folder_path, "private/keypair_backup"),
-      crl_dir: File.join(Dir.pwd, folder_path, "crl"),
-      crl_file: File.join(Dir.pwd, folder_path, "crl", "ca.crl"),
-      crl_pem_file: File.join(Dir.pwd, folder_path, "crl", "ca.pem"),
-    }
+      CA_dir: File.join(@cert_directory),
+      private_dir: File.join(@cert_directory, "private"),
+      keypair_file: File.join(@cert_directory, "private/cakeypair.pem"),
+      cert_file: File.join(@cert_directory, "cacert.pem"),
+      serial_file: File.join(@cert_directory, "serial"),
+      new_certs_dir: File.join(@cert_directory, "newcerts"),
+      new_keypair_dir: File.join(@cert_directory, "private/keypair_backup"),
+      crl_dir: File.join(@cert_directory, "crl"),
+      crl_file: File.join(@cert_directory, "crl", "ca.crl"),
+      crl_pem_file: File.join(@cert_directory, "crl", "ca.pem")
+    }.each do |key, path|
+      if key.to_s.include?("dir")
+        Dir.mkdir(path, 0o700) unless File.exist?(path)
+      else
+        # File.open(path, "w") {} unless File.exist?(path)
+      end
+    end
   end
 end # class Certificate

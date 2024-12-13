@@ -3,7 +3,7 @@ require "certificate"
 RSpec.describe Certificate do
   before(:all) do
     config = {path: "tmp/CA"}
-    @certificate = Certificate.new(config)
+    @certificate = Certificate.new(config, cert_directory: "tmp/CA")
     @config = @certificate.config
   end
 

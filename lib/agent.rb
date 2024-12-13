@@ -14,11 +14,12 @@ require_relative "proxy"
 #
 
 class Agent < Proxy
-  def initialize_callbacks config
+  def initialize_callbacks(config)
     @mitm_server = config[:MITMProxyServer]
   end
 
   # It's a direct copy from webrick
+  # Continues the request on the clients behalf
   def perform_proxy_request(req, res, req_class, body_stream = nil)
     uri = req.request_uri
     path = uri.path.dup

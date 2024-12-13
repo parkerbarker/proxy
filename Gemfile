@@ -10,3 +10,4 @@ gem "openssl"
 # Development/testing tools
 gem "rspec", group: :development
 gem "minitest", group: :development
+gem "standard", group: :development
