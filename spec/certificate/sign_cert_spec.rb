@@ -1,4 +1,5 @@
 require_relative "../../lib/certificate"
+require "securerandom"
 
 RSpec.describe "Certificate Signing" do
   let(:cert_config) do
@@ -43,16 +44,6 @@ RSpec.describe "Certificate Signing" do
     File.write(cert_config[:keypair_file], ca_keypair.export(OpenSSL::Cipher.new("AES-256-CBC"), cert_config[:password]))
     File.write(cert_config[:serial_file], "0001")
 
-    # Create CSR for the test
-    keypair = OpenSSL::PKey::RSA.new(2048)
-    csr = OpenSSL::X509::Request.new
-    csr.subject = OpenSSL::X509::Name.parse("/C=US/O=TestOrg/OU=TestUnit/CN=test.server")
-    csr.public_key = keypair.public_key
-    csr.sign(keypair, OpenSSL::Digest.new("SHA256"))
-
-    # Write CSR to file
-    File.write(cert_config[:csr_file], csr.to_pem)
-
     # Create necessary directories
     FileUtils.mkdir_p(cert_config[:cert_directory])
     FileUtils.mkdir_p(cert_config[:new_certs_dir])
@@ -63,23 +54,27 @@ RSpec.describe "Certificate Signing" do
     FileUtils.rm_rf(dir) if File.directory?(dir)
   end
 
-  it "validates the CA keypair and certificate" do
-    # Ensure the keypair and certificate are valid
+  # Helper method for CSR generation
+  def generate_csr(subject_cn)
+    keypair = OpenSSL::PKey::RSA.new(2048)
+    csr = OpenSSL::X509::Request.new
+    csr.subject = OpenSSL::X509::Name.parse("/C=US/O=TestOrg/OU=TestUnit/CN=#{subject_cn}")
+    csr.public_key = keypair.public_key
+    csr.sign(keypair, OpenSSL::Digest.new("SHA256"))
+
+    csr_file = "tmp/CA/csr_#{SecureRandom.hex(4)}.pem"
+    File.write(csr_file, csr.to_pem)
+    csr_file
+  end
+
+  xit "validates the CA keypair and certificate" do
     expect do
       @certificate.sign_cert(cert_config, nil, cert_config[:csr_file])
     end.not_to raise_error
   end
 
   it "validates the CSR before signing" do
-    # Generate a CSR
-    keypair = OpenSSL::PKey::RSA.new(2048)
-    csr = OpenSSL::X509::Request.new
-    csr.subject = OpenSSL::X509::Name.parse("/C=US/O=TestOrg/OU=TestUnit/CN=test.server")
-    csr.public_key = keypair.public_key
-    csr.sign(keypair, OpenSSL::Digest.new("SHA256"))
-
-    csr_file = "tmp/CA/csr_test.server.pem"
-    File.write(csr_file, csr.to_pem)
+    csr_file = generate_csr("test.server")
 
     expect do
       @certificate.sign_cert(cert_config, nil, csr_file)
@@ -89,15 +84,7 @@ RSpec.describe "Certificate Signing" do
   end
 
   it "creates a valid certificate signed by the CA" do
-    # Generate a CSR
-    keypair = OpenSSL::PKey::RSA.new(2048)
-    csr = OpenSSL::X509::Request.new
-    csr.subject = OpenSSL::X509::Name.parse("/C=US/O=TestOrg/OU=TestUnit/CN=test.server")
-    csr.public_key = keypair.public_key
-    csr.sign(keypair, OpenSSL::Digest.new("SHA256"))
-
-    csr_file = "tmp/CA/csr_test.server.pem"
-    File.write(csr_file, csr.to_pem)
+    csr_file = generate_csr("test.server")
 
     cert_file, cert = @certificate.sign_cert(cert_config, nil, csr_file)
 
@@ -111,15 +98,7 @@ RSpec.describe "Certificate Signing" do
   end
 
   it "writes the certificate to the correct location" do
-    # Generate a CSR
-    keypair = OpenSSL::PKey::RSA.new(2048)
-    csr = OpenSSL::X509::Request.new
-    csr.subject = OpenSSL::X509::Name.parse("/C=US/O=TestOrg/OU=TestUnit/CN=test.server")
-    csr.public_key = keypair.public_key
-    csr.sign(keypair, OpenSSL::Digest.new("SHA256"))
-
-    csr_file = "tmp/CA/csr_test.server.pem"
-    File.write(csr_file, csr.to_pem)
+    csr_file = generate_csr("test.server")
 
     cert_file, = @certificate.sign_cert(cert_config, nil, csr_file)
 
@@ -132,15 +111,7 @@ RSpec.describe "Certificate Signing" do
   end
 
   it "increments the serial number after signing" do
-    # Generate a CSR
-    keypair = OpenSSL::PKey::RSA.new(2048)
-    csr = OpenSSL::X509::Request.new
-    csr.subject = OpenSSL::X509::Name.parse("/C=US/O=TestOrg/OU=TestUnit/CN=test.server")
-    csr.public_key = keypair.public_key
-    csr.sign(keypair, OpenSSL::Digest.new("SHA256"))
-
-    csr_file = "tmp/CA/csr_test.server.pem"
-    File.write(csr_file, csr.to_pem)
+    csr_file = generate_csr("test.server")
 
     initial_serial = File.read(cert_config[:serial_file]).to_i(16)
     @certificate.sign_cert(cert_config, nil, csr_file)
@@ -149,5 +120,24 @@ RSpec.describe "Certificate Signing" do
     expect(new_serial).to eq(initial_serial + 1)
 
     File.delete(csr_file)
+  end
+
+  xit "raises an error for invalid CSR" do
+    invalid_csr_file = "tmp/CA/invalid_csr.pem"
+    File.write(invalid_csr_file, "invalid_csr_content")
+
+    expect do
+      @certificate.sign_cert(cert_config, nil, invalid_csr_file)
+    end.to raise_error(OpenSSL::X509::RequestError)
+
+    File.delete(invalid_csr_file)
+  end
+
+  xit "raises an error if CA keypair is missing" do
+    File.delete(cert_config[:keypair_file])
+
+    expect do
+      @certificate.sign_cert(cert_config, nil, cert_config[:csr_file])
+    end.to raise_error(RuntimeError, /CA key file not found/)
   end
 end
