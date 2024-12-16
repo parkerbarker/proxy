@@ -14,3 +14,16 @@ kind of like an event machine. One of the shopify guys had a libary i discovered
 I'm feeling pretty pumped about this as it's really simple as of right now from a routing perspective. On the Certificate side though it seems complicated. It's pretty exciting actually, I'm interested in understanding it more, and remembered I know a guy from a meet up I went to that runs a certificate business. I wonder if he does consulting and would pair with me on my code.
 
 If you want my advice, start working on the agent spec, then the certificate spec, and end with the middleware spec.
+
+https://github.dev/ruby/webrick/blob/master/lib/webrick/httpproxy.rb
+http://httpbin.org/#/HTTP_Methods/put_put
+https://github.com/bbtfr/evil-proxy/blob/master/lib/evil-proxy/httpproxy.rb
+https://github.com/httprb/http
+
+**start proxy**
+require 'middleware'
+proxy = Middleware.new Port: 8080
+proxy.start
+
+test with curl
+https_proxy=http://localhost:8080 curl https://github.com --insecure

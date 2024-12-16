@@ -1,3 +1,5 @@
-/_sandbox_.rb
-certs/*
+certificates/intermediate
+certificates/root
+_sandbox_.rb
 .vscode
+.past
