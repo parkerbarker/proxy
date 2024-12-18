@@ -66,7 +66,15 @@ class Certificate
 
     # Validates the domain name
     def validate_domain!(domain)
+      # Check if the domain is nil or empty
+      if domain.nil? || domain.empty?
+        raise ArgumentError, "Domain name cannot be nil or empty"
+      end
+
+      # Define the regex pattern for a valid domain name
       domain_regex = /\A[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+\z/
+
+      # Check if the domain matches the regex
       unless domain.match?(domain_regex)
         raise ArgumentError, "Invalid domain name: #{domain}"
       end
