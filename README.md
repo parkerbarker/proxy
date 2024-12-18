@@ -1,29 +1,32 @@
 # PB Proxy
 
-Dec 12th 12:31am
+[V1 Project Board](https://github.com/orgs/parkerbarker/projects/4)
 
-Explored initial stucture with a ruby and rust system
+#### Install dependencies
 
-Dec 13th 11:08
+```bash
+# Install ruby -v 3.2.2 or greater
+bundle install
+```
 
-Decided to start with ruby initially. Found a old repo that contained a gem for creating proxy servers. Found a few rust examples of proxy servers. Found a lot.
+#### Start server
 
-Anyways I've started mapping out the system, which will act
-kind of like an event machine. One of the shopify guys had a libary i discovered that was starting to build using the event machine gem. This whole system could be considered an event system. Each event you add on takes some kind of latency.
+This can be run in a ruby session by using `irb`.
+```ruby
+require_relative "proxy/mitm_proxy"
 
-I'm feeling pretty pumped about this as it's really simple as of right now from a routing perspective. On the Certificate side though it seems complicated. It's pretty exciting actually, I'm interested in understanding it more, and remembered I know a guy from a meet up I went to that runs a certificate business. I wonder if he does consulting and would pair with me on my code.
-
-If you want my advice, start working on the agent spec, then the certificate spec, and end with the middleware spec.
-
-https://github.dev/ruby/webrick/blob/master/lib/webrick/httpproxy.rb
-http://httpbin.org/#/HTTP_Methods/put_put
-https://github.com/bbtfr/evil-proxy/blob/master/lib/evil-proxy/httpproxy.rb
-https://github.com/httprb/http
-
-**start proxy**
-require 'middleware'
-proxy = Middleware.new Port: 8080
+proxy = MITMProxy.new(port: 8080)
 proxy.start
+```
 
-test with curl
-https_proxy=http://localhost:8080 curl https://github.com --insecure
+#### Run Tests
+
+Tests can be run by running `rspec` command in your console.
+
+#### Test server connection
+
+```bash
+curl -x http://localhost:8080 --cacert rootCA.crt -d "param=value" -X POST https://www.example.com
+```
+
+

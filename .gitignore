@@ -3,3 +3,4 @@ certificates/root
 _sandbox_.rb
 .vscode
 .past
+tmp/
