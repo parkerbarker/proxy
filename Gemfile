@@ -8,6 +8,8 @@ gem "bundle"
 gem "openssl"
 
 # Development/testing tools
-gem "rspec", group: :development
-gem "minitest", group: :development
-gem "standard", group: :development
+group :development do
+  gem "rspec"
+  gem "minitest"
+  gem "standard"
+end
