@@ -4,8 +4,8 @@
 set -e
 
 # Variables
-ROOT_CA_DIR="./root"
-INTERMEDIATE_CA_DIR="./intermediate"
+ROOT_CA_DIR="./certificates/root"
+INTERMEDIATE_CA_DIR="./certificates/intermediate"
 DOMAIN="test.parkerbarker.com"
 
 # Create directories and initialize files for Root CA

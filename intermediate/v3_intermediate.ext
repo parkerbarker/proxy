@@ -1,3 +1,0 @@
-basicConstraints = CA:TRUE, pathlen:0
-keyUsage = critical, digitalSignature, keyCertSign, cRLSign
-authorityKeyIdentifier = keyid:always,issuer
