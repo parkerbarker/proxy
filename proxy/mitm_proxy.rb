@@ -15,26 +15,12 @@ class MITMProxy
   end
 
   def start
-    # Run the setup_certs.sh script when the proxy starts
-    run_cert_setup_script
     puts "MITM Proxy running on port #{@port}"
     trap("INT") { @server.shutdown }
     @server.start
   end
 
   private
-
-  def run_cert_setup_script
-    puts "Running setup_certs.sh to generate certificates..."
-    # Use system to execute the shell script
-    system('./certificates/setup_certs.sh')
-
-    if $?.success?
-      puts "Certificate setup completed successfully!"
-    else
-      puts "Error occurred during certificate setup."
-    end
-  end
 
   # Handle intercepted content (modify request/response here)
   def handle_content(req, res)
