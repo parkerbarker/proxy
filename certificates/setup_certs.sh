@@ -4,9 +4,9 @@
 set -e
 
 # Variables
-ROOT_CA_DIR="./certificates/root"
-INTERMEDIATE_CA_DIR="./certificates/intermediate"
-DOMAIN="test.parkerbarker.com"
+ROOT_CA_DIR="./root"
+INTERMEDIATE_CA_DIR="./intermediate"
+DOMAIN="example.com"
 
 # Create directories and initialize files for Root CA
 mkdir -p $ROOT_CA_DIR/{certs,crl,newcerts,private}

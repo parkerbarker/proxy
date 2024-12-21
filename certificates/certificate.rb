@@ -47,7 +47,7 @@ class Certificate
       certificate.add_extension(ef.create_extension("keyUsage", "digitalSignature,keyEncipherment", true))
       certificate.add_extension(ef.create_extension("extendedKeyUsage", "serverAuth", true))
       certificate.add_extension(ef.create_extension("subjectKeyIdentifier", "hash"))
-      certificate.add_extension(ef.create_extension("authorityKeyIdentifier", "keyid:always,issuer:always"))
+      # certificate.add_extension(ef.create_extension("authorityKeyIdentifier", "keyid:always,issuer:always"))
 
       # Sign the Certificate
       certificate.issuer = intermediate_cert.subject
