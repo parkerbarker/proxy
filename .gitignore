@@ -1,5 +1,6 @@
 certificates/intermediate
 certificates/root
+certificates/chain.pem
 _sandbox_.rb
 .vscode
 .past

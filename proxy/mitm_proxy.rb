@@ -3,16 +3,18 @@ require "webrick/httpproxy"
 require "openssl"
 require "socket"
 require 'net/http'
+require 'logger'
 require_relative "../certificates/certificate"
 
 class MITMProxy
   def initialize(port: 8080)
     @port = port
+    @logger = Logger.new('proxy_logs.log', 'daily') # Logs rotate daily
     @server = WEBrick::HTTPProxyServer.new(
       Port: @port,
       SSLEnable: true,
       ProxyVia: true,
-      SSLVerifyClient: OpenSSL::SSL::VERIFY_NONE,
+      # SSLVerifyClient: OpenSSL::SSL::VERIFY_NONE,
       ProxyContentHandler: method(:handle_content)
     )
   end
@@ -38,6 +40,8 @@ class MITMProxy
 
   def handle_http(req, res)
     puts "[HTTP] Intercepted request: #{req.request_line}"
+
+    log_request(req)
 
     case req.request_method
     when "GET"
@@ -97,6 +101,8 @@ class MITMProxy
     # Send the request and get the response
     response = http.request(request)
 
+    log_response(response)
+
     # Set the response code and body
     res.status = response.code.to_i
     res.body = response.body
@@ -115,8 +121,6 @@ class MITMProxy
       return
     end
 
-    puts "Host: #{host}"
-
     # Generate certificate for the intercepted host
     begin
       cert_data = Certificate.generate(host)
@@ -131,15 +135,17 @@ class MITMProxy
 
     puts "Generated certificate for #{host}"
 
+    base_dir = File.expand_path('../certificates', __dir__)
+
     # Load Root and Intermediate Certificates
-    root_ca_cert_path = "/home/haider/Projects/proxy/certificates/root/certs/rootCA.crt"
+    root_ca_cert_path = File.join(base_dir, 'root/certs/rootCA.crt')
     root_ca_cert = OpenSSL::X509::Certificate.new(File.read(root_ca_cert_path))
 
-    intermediate_cert_path = "/home/haider/Projects/proxy/certificates/intermediate/certs/intermediateCA.crt"
+    intermediate_cert_path = File.join(base_dir, 'intermediate/certs/intermediateCA.crt')
     intermediate_cert = OpenSSL::X509::Certificate.new(File.read(intermediate_cert_path))
 
     # Create Chain File (chain.pem)
-    chain_file_path = "/home/haider/Projects/proxy/certificates/chain.pem"
+    chain_file_path = File.join(base_dir, 'chain.pem')
     File.open(chain_file_path, 'w') do |f|
       f.puts intermediate_cert.to_pem
       f.puts root_ca_cert.to_pem
@@ -155,6 +161,7 @@ class MITMProxy
     # Use TLS v1.2 and v1.3 (if supported by OpenSSL)
     ssl_context.ssl_version = :TLSv1_2
     ssl_context.ciphers = 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384'
+
     # Access the raw socket from the HTTP request
     client = req.instance_variable_get(:@socket)
     client_ssl = OpenSSL::SSL::SSLSocket.new(client, ssl_context)
@@ -163,7 +170,7 @@ class MITMProxy
     # Handle SSL handshake with the client
     Thread.new do
       begin
-        client_ssl.connect
+        client_ssl.accept
         puts "[INFO] SSL handshake successful"
       rescue OpenSSL::SSL::SSLError => e
         puts "[ERROR] SSL handshake failed: #{e.message}"
@@ -171,30 +178,21 @@ class MITMProxy
         res.body = "SSL Handshake Error: #{e.message}"
         client_ssl.close
       end
+
+      # Establish connection to the upstream server
+      begin
+        upstream_socket = TCPSocket.new(host, port)
+        upstream_ssl = OpenSSL::SSL::SSLSocket.new(upstream_socket)
+        upstream_ssl.sync_close = true
+        upstream_ssl.connect
+      rescue => e
+        puts "[ERROR] Failed to connect to upstream server #{host}: #{e.message}"
+        client_ssl.close
+        return
+      end
     end
 
-    # Establish connection to the upstream server
-    begin
-      upstream_socket = TCPSocket.new(host, port)
-      upstream_ssl = OpenSSL::SSL::SSLSocket.new(upstream_socket)
-      upstream_ssl.sync_close = true
-      upstream_ssl.connect
-    rescue => e
-      puts "[ERROR] Failed to connect to upstream server #{host}: #{e.message}"
-      client_ssl.close
-      return
-    end
-
-    intercept_https(client_ssl, upstream_ssl)
-  end
-
-  # Select SSL version (TLSv1_2 or TLSv1_3 depending on availability)
-  def select_ssl_version
-    if OpenSSL::SSL::SSLContext::METHODS.include?(:TLSv1_3)
-      return :TLSv1_3
-    else
-      return :TLSv1_2
-    end
+    # intercept_https(client_ssl, upstream_ssl)
   end
 
   def intercept_https(client_ssl, upstream_ssl)
@@ -202,6 +200,7 @@ class MITMProxy
       begin
         loop do
           data = client_ssl.readpartial(1024)
+          log_https_data(data, "Client to Server")
           upstream_ssl.write(data)
         end
       rescue EOFError
@@ -213,11 +212,30 @@ class MITMProxy
       begin
         loop do
           data = upstream_ssl.readpartial(1024)
+          log_https_data(data, "Server to Client")
           client_ssl.write(data)
         end
       rescue EOFError
         puts "[INFO] EOF reached on server side"
       end
     end
+  end
+
+  def log_request(req)
+    @logger.info("[LOG] Request Headers:")
+    req.each_header { |k, v| @logger.info("  #{k}: #{v}") }
+    @logger.info("[LOG] Request Body: #{req.body}") if req.body
+  end
+
+  def log_response(res)
+    @logger.info("[LOG] Response Status: #{res.code}")
+    res.each_header { |k, v| @logger.info("  #{k}: #{v}") }
+    @logger.info("[LOG] Response Body: #{res.body}") if res.body
+  end
+
+  def log_https_data(data, direction)
+    puts "ahmadaddsads"
+    @logger.info("[LOG] HTTPS #{direction} Data:")
+    @logger.debug(data.inspect) # Use debug level for detailed data
   end
 end
