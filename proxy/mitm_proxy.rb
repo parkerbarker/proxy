@@ -4,16 +4,23 @@ require "openssl"
 require "socket"
 require 'net/http'
 require 'logger'
+require 'timeout'
+require 'mutex_m'
 require_relative "../certificates/certificate"
 
 class MITMProxy
   def initialize(port: 8080)
     @port = port
-    @logger = Logger.new('proxy_logs.log', 'daily') # Logs rotate daily
+    @logger = Logger.new("proxy_logs.log", "daily") # Logs rotate daily
     @server = WEBrick::HTTPProxyServer.new(
       Port: @port,
       SSLEnable: true,
       ProxyVia: true,
+      AccessLog: [
+        [@logger, "%h %l %u %t \"%r\" %>s %b"],
+        [@logger, "%v"]
+      ],
+      Logger: @logger,
       # SSLVerifyClient: OpenSSL::SSL::VERIFY_NONE,
       ProxyContentHandler: method(:handle_content)
     )
@@ -21,11 +28,27 @@ class MITMProxy
 
   def start
     puts "MITM Proxy running on port #{@port}"
-    trap("INT") { @server.shutdown }
+    trap("INT") do
+      puts "Shutting down server..."
+      @server.shutdown
+      cleanup_resources
+    end
     @server.start
   end
-
+  
   private
+  
+  def cleanup_resources
+    # Close all sockets if any
+    @server.listeners.each(&:close) if @server.respond_to?(:listeners)
+  
+    # Terminate threads
+    Thread.list.each do |thread|
+      thread.kill unless thread == Thread.current
+    end
+  
+    puts "All resources cleaned up."
+  end
 
   def handle_content(req, res)
     puts "Intercepted request to #{req.host}"
@@ -110,9 +133,9 @@ class MITMProxy
 
   def handle_https(req, res)
     puts "[HTTPS] #{req.request_line}"
-
+  
     host = req.request_line.split(" ")[1].split(":")[0]
-    port = 443  # Default to port 443 for HTTPS
+    port = req.request_line.split(" ")[1].split(":")[1] || 443  # Default to port 443 for HTTPS
 
     if host.nil? || host.empty?
       puts "[ERROR] Unable to extract host from request: #{req.request_line}"
@@ -120,7 +143,7 @@ class MITMProxy
       res.body = "Internal Server Error: Unable to determine host"
       return
     end
-
+  
     # Generate certificate for the intercepted host
     begin
       cert_data = Certificate.generate(host)
@@ -132,91 +155,144 @@ class MITMProxy
       res.body = "Internal Server Error: Invalid certificate request"
       return
     end
-
+  
     puts "Generated certificate for #{host}"
-
+  
     base_dir = File.expand_path('../certificates', __dir__)
-
+  
     # Load Root and Intermediate Certificates
     root_ca_cert_path = File.join(base_dir, 'root/certs/rootCA.crt')
     root_ca_cert = OpenSSL::X509::Certificate.new(File.read(root_ca_cert_path))
-
+  
     intermediate_cert_path = File.join(base_dir, 'intermediate/certs/intermediateCA.crt')
     intermediate_cert = OpenSSL::X509::Certificate.new(File.read(intermediate_cert_path))
-
+  
     # Create Chain File (chain.pem)
     chain_file_path = File.join(base_dir, 'chain.pem')
     File.open(chain_file_path, 'w') do |f|
       f.puts intermediate_cert.to_pem
       f.puts root_ca_cert.to_pem
     end
-
+  
     # SSL Context Configuration
     ssl_context = OpenSSL::SSL::SSLContext.new
     ssl_context.cert = cert
     ssl_context.key = key
     ssl_context.ca_file = chain_file_path
     ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+    # ssl_context.extra_chain_cert = [
+    #   OpenSSL::X509::Certificate.new(File.read("./certificates/intermediate/certs/intermediateCA.crt")),
+    #   OpenSSL::X509::Certificate.new(File.read("./certificates/root/certs/rootCA.crt"))
+    # ]
 
-    # Use TLS v1.2 and v1.3 (if supported by OpenSSL)
-    ssl_context.ssl_version = :TLSv1_2
-    ssl_context.ciphers = 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384'
-
+    # Allow multiple SSL/TLS versions
+    ssl_context.min_version = OpenSSL::SSL::TLS1_VERSION
+    ssl_context.max_version = OpenSSL::SSL::TLS1_2_VERSION
+    ssl_context.ciphers = OpenSSL::SSL::SSLContext::DEFAULT_PARAMS[:ciphers]
+  
     # Access the raw socket from the HTTP request
     client = req.instance_variable_get(:@socket)
     client_ssl = OpenSSL::SSL::SSLSocket.new(client, ssl_context)
+    # client_ssl.io.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
     client_ssl.sync_close = true
+  
+    upstream_ssl = nil
+    upstream_socket = nil
 
-    # Handle SSL handshake with the client
     Thread.new do
       begin
+        # Perform SSL handshake with the client
         client_ssl.accept
-        puts "[INFO] SSL handshake successful"
-      rescue OpenSSL::SSL::SSLError => e
-        puts "[ERROR] SSL handshake failed: #{e.message}"
-        res.status = 500
-        res.body = "SSL Handshake Error: #{e.message}"
-        client_ssl.close
-      end
+        puts "[INFO] SSL handshake successful with client"
 
-      # Establish connection to the upstream server
-      begin
+        upstream_ssl_context = OpenSSL::SSL::SSLContext.new
+        # # upstream_ssl_context.ca_file = chain_file_path
+        # upstream_ssl_context.ca_file = '/etc/ssl/certs/ca-certificates.crt'
+        # upstream_ssl_context.verify_mode = OpenSSL::SSL::VERIFY_NONE
+        # upstream_ssl_context.min_version = OpenSSL::SSL::TLS1_2_VERSION
+        # upstream_ssl_context.max_version = OpenSSL::SSL::TLS1_3_VERSION
+        # upstream_ssl_context.ciphers = OpenSSL::SSL::SSLContext::DEFAULT_PARAMS[:ciphers]
+        
+        upstream_ssl_context.set_params(
+          ca_file: '/etc/ssl/certs/ca-certificates.crt',
+          verify_mode: OpenSSL::SSL::VERIFY_PEER,
+          min_version: OpenSSL::SSL::TLS1_VERSION,
+          max_version: OpenSSL::SSL::TLS1_2_VERSION,
+          ciphers: OpenSSL::SSL::SSLContext::DEFAULT_PARAMS[:ciphers]
+        )
+        # Connect to the upstream server
         upstream_socket = TCPSocket.new(host, port)
-        upstream_ssl = OpenSSL::SSL::SSLSocket.new(upstream_socket)
+        puts "[DEBUG] Connected to upstream server #{host} on port #{port}"
+      
+        upstream_ssl = OpenSSL::SSL::SSLSocket.new(upstream_socket, upstream_ssl_context)
+        upstream_ssl.io.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
         upstream_ssl.sync_close = true
+      
+        # Establish SSL connection to the upstream server
         upstream_ssl.connect
+        puts "[INFO] SSL handshake successful with upstream server"
+
+        # Start intercepting HTTPS traffic
+        intercept_https(client_ssl, upstream_ssl)
+
+      rescue OpenSSL::SSL::SSLError => e
+        puts "[ERROR] SSL error: #{e.message}"
+        client_ssl.close unless client_ssl.closed?
+        upstream_ssl.close if upstream_ssl && !upstream_ssl.closed?
+      rescue SocketError => e
+        puts "[ERROR] Socket error: #{e.message}"
+        client_ssl.close unless client_ssl.closed?
+        upstream_ssl.close if upstream_ssl && !upstream_ssl.closed?
+      rescue IOError => e
+        puts "[ERROR] IOError: #{e.message}"
+        client_ssl.close unless client_ssl.closed?
+        upstream_ssl.close if upstream_ssl && !upstream_ssl.closed?
       rescue => e
-        puts "[ERROR] Failed to connect to upstream server #{host}: #{e.message}"
-        client_ssl.close
-        return
+        puts "[ERROR] Unexpected error: #{e.message}"
+        client_ssl.close unless client_ssl.closed?
+        upstream_ssl.close if upstream_ssl && !upstream_ssl.closed?
+      ensure
+        # Ensure all sockets are closed after the operation
+        client_ssl.close unless client_ssl.closed?
+        upstream_ssl.close if upstream_ssl && !upstream_ssl.closed?
+        upstream_socket.close if upstream_socket && !upstream_socket.closed?
       end
     end
-
-    # intercept_https(client_ssl, upstream_ssl)
-  end
+  end  
 
   def intercept_https(client_ssl, upstream_ssl)
-    Thread.new do
-      begin
-        loop do
-          data = client_ssl.readpartial(1024)
-          log_https_data(data, "Client to Server")
-          upstream_ssl.write(data)
-        end
-      rescue EOFError
-        puts "[INFO] EOF reached on client side"
+    loop do
+      if client_ssl.closed?
+        puts "A"
+      elsif upstream_ssl.closed?
+        puts "B"
       end
-    end
 
-    Thread.new do
-      begin
-        loop do
-          data = upstream_ssl.readpartial(1024)
-          log_https_data(data, "Server to Client")
-          client_ssl.write(data)
+      readable_sockets = IO.select([client_ssl, upstream_ssl])&.first
+  
+      readable_sockets&.each do |socket|
+        begin
+          data = socket.read_nonblock(4096)
+          if socket == client_ssl
+            puts "sadad"
+            upstream_ssl.write(data)
+            upstream_ssl.flush
+          else
+            client_ssl.write(data)
+            client_ssl.flush
+          end
+        rescue IO::WaitReadable, IO::WaitWritable
+          next
+        rescue EOFError
+          puts "[INFO] Connection closed by #{socket == client_ssl ? 'client' : 'upstream'}"
+          return
+        rescue IOError => e
+          puts "[INFO] Stream closed: #{e.message}"
+          return
+        rescue => e
+          puts "[ERROR] Unexpected error during data transfer: #{e.message}"
+          return
         end
-      rescue EOFError
-        puts "[INFO] EOF reached on server side"
       end
     end
   end
@@ -234,7 +310,6 @@ class MITMProxy
   end
 
   def log_https_data(data, direction)
-    puts "ahmadaddsads"
     @logger.info("[LOG] HTTPS #{direction} Data:")
     @logger.debug(data.inspect) # Use debug level for detailed data
   end
