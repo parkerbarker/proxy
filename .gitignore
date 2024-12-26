@@ -1,6 +1,7 @@
 certificates/intermediate
 certificates/root
-certificates/chain.pem
+certificates/dynamic
+proxy_logs.log
 _sandbox_.rb
 .vscode
 .past
