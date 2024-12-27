@@ -3,6 +3,7 @@ require 'openssl'
 require 'uri'
 require 'fileutils'
 require 'logger'
+require_relative 'certificate'
 
 class MITMProxy
   def initialize(port:, logging_enabled: true)
@@ -54,11 +55,6 @@ class MITMProxy
         return
       end
 
-      unless valid_target?(target)
-        send_error_response(client, 400, "Bad Request: Invalid target #{target}")
-        return
-      end
-
       if method == 'CONNECT'
         handle_https_connect(client, target)
       else
@@ -86,18 +82,11 @@ class MITMProxy
     %w[CONNECT GET POST PUT DELETE PATCH].include?(method)
   end
 
-  def valid_target?(target)
-    uri = URI.parse(target)
-    valid_domain?(uri.host)
-  rescue URI::InvalidURIError
-    false
-  end
-
   def valid_domain?(domain)
     return false unless domain
 
-    # Regex to validate domain format
-    domain =~ /\A[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\z/
+    # Enhanced regex for domain validation
+    domain =~ /\A[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}\z/
   end
 
   def http_status_message(code)
@@ -110,31 +99,50 @@ class MITMProxy
   end
 
   def handle_https_connect(client, target)
-      host, port = target.split(':')
-      port ||= 443
+    host, port = target.split(':')
+    port ||= 443
 
-      unless valid_domain?(host)
-        send_error_response(client, 400, "Invalid domain in HTTPS target: #{host}")
-        return
-      end
+    # Validate the domain
+    unless valid_domain?(host)
+      log("[ERROR] Invalid domain in HTTPS target: #{host}")
+      send_error_response(client, 400, "Invalid domain in HTTPS target: #{host}")
+      return # Exit the thread for this client
+    end
 
-      log("[HTTPS] Intercepting: #{host}:#{port}")
+    log("[HTTPS] Intercepting: #{host}:#{port}")
 
-      cert, key = generate_or_retrieve_cert(host)
+    # Generate or retrieve certificate and key for the host
+    begin
+      cert, key = Certificate.generate_or_retrieve_cert(host, @cert_dir, @ca_key)
+    rescue => e
+      log("[ERROR] Failed to generate or retrieve certificate for #{host}: #{e.message}")
+      send_error_response(client, 500, "Internal Server Error: Unable to generate certificate for #{host}")
+      return # Exit the thread
+    end
 
-      ssl_context = OpenSSL::SSL::SSLContext.new
-      ssl_context.cert = cert
-      ssl_context.key = key
-      ssl_context.min_version = OpenSSL::SSL::TLS1_2_VERSION
-      ssl_context.max_version = OpenSSL::SSL::TLS1_3_VERSION
+    # Set up SSL context for the client connection
+    ssl_context = OpenSSL::SSL::SSLContext.new
+    ssl_context.cert = cert
+    ssl_context.key = key
+    ssl_context.min_version = OpenSSL::SSL::TLS1_2_VERSION
+    ssl_context.max_version = OpenSSL::SSL::TLS1_3_VERSION
 
-      client.write("HTTP/1.1 200 Connection Established\r\n\r\n")
+    # Respond to the client to establish the connection
+    client.write("HTTP/1.1 200 Connection Established\r\n\r\n")
 
+    # Create an SSL connection with the client
+    begin
       client_ssl = OpenSSL::SSL::SSLSocket.new(client, ssl_context)
       client_ssl.sync_close = true
       client_ssl.accept
 
+      # Forward traffic between the client and the upstream server
       forward_https_traffic(client_ssl, host, port)
+    rescue => e
+      log("[ERROR] Failed to establish SSL connection with client: #{e.message}")
+    ensure
+      client_ssl.close if client_ssl && !client_ssl.closed?
+    end
   end
 
   def forward_https_traffic(client_ssl, host, port)
@@ -237,41 +245,41 @@ class MITMProxy
     client.close
   end
 
-  def generate_or_retrieve_cert(host)
-    cert_path = File.join(@cert_dir, "#{host}.crt")
-    key_path = File.join(@cert_dir, "#{host}.key")
+  # def generate_or_retrieve_cert(host)
+  #   cert_path = File.join(@cert_dir, "#{host}.crt")
+  #   key_path = File.join(@cert_dir, "#{host}.key")
 
-    if File.exist?(cert_path) && File.exist?(key_path)
-      return [
-        OpenSSL::X509::Certificate.new(File.read(cert_path)),
-        OpenSSL::PKey::RSA.new(File.read(key_path))
-      ]
-    end
+  #   if File.exist?(cert_path) && File.exist?(key_path)
+  #     return [
+  #       OpenSSL::X509::Certificate.new(File.read(cert_path)),
+  #       OpenSSL::PKey::RSA.new(File.read(key_path))
+  #     ]
+  #   end
 
-    key = OpenSSL::PKey::RSA.new(2048)
-    cert = OpenSSL::X509::Certificate.new
-    cert.subject = OpenSSL::X509::Name.parse("/CN=#{host}")
-    cert.issuer = @ca_cert.subject
-    cert.public_key = key.public_key
-    cert.serial = rand(1..100_000)
-    cert.version = 2
-    cert.not_before = Time.now
-    cert.not_after = Time.now + 365 * 24 * 60 * 60
+  #   key = OpenSSL::PKey::RSA.new(2048)
+  #   cert = OpenSSL::X509::Certificate.new
+  #   cert.subject = OpenSSL::X509::Name.parse("/CN=#{host}")
+  #   cert.issuer = @ca_cert.subject
+  #   cert.public_key = key.public_key
+  #   cert.serial = rand(1..100_000)
+  #   cert.version = 2
+  #   cert.not_before = Time.now
+  #   cert.not_after = Time.now + 365 * 24 * 60 * 60
 
-    extension_factory = OpenSSL::X509::ExtensionFactory.new
-    extension_factory.subject_certificate = cert
-    extension_factory.issuer_certificate = @ca_cert
-    cert.add_extension(extension_factory.create_extension('basicConstraints', 'CA:FALSE'))
-    cert.add_extension(extension_factory.create_extension('keyUsage', 'keyEncipherment,dataEncipherment,digitalSignature'))
-    cert.add_extension(extension_factory.create_extension('subjectKeyIdentifier', 'hash'))
+  #   extension_factory = OpenSSL::X509::ExtensionFactory.new
+  #   extension_factory.subject_certificate = cert
+  #   extension_factory.issuer_certificate = @ca_cert
+  #   cert.add_extension(extension_factory.create_extension('basicConstraints', 'CA:FALSE'))
+  #   cert.add_extension(extension_factory.create_extension('keyUsage', 'keyEncipherment,dataEncipherment,digitalSignature'))
+  #   cert.add_extension(extension_factory.create_extension('subjectKeyIdentifier', 'hash'))
 
-    cert.sign(@ca_key, OpenSSL::Digest::SHA256.new)
+  #   cert.sign(@ca_key, OpenSSL::Digest::SHA256.new)
 
-    File.write(cert_path, cert.to_pem)
-    File.write(key_path, key.to_pem)
+  #   File.write(cert_path, cert.to_pem)
+  #   File.write(key_path, key.to_pem)
 
-    [cert, key]
-  end
+  #   [cert, key]
+  # end
 end
 
 # Start the proxy
