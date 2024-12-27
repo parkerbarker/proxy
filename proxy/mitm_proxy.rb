@@ -43,37 +43,98 @@ class MITMProxy
   end
 
   def handle_client(client)
-    request_line = client.gets
-    method, target, _ = request_line.split(' ')
+    begin
+      request_line = client.gets
+      return if request_line.nil?
 
-    if method == 'CONNECT'
-      handle_https_connect(client, target)
-    else
-      handle_http_request(client, method, target)
+      method, target, _ = request_line.split(' ')
+
+      unless valid_http_method?(method)
+        send_error_response(client, 405, "Method not Allowed: #{method}")
+        return
+      end
+
+      unless valid_target?(target)
+        send_error_response(client, 400, "Bad Request: Invalid target #{target}")
+        return
+      end
+
+      if method == 'CONNECT'
+        handle_https_connect(client, target)
+      else
+        handle_http_request(client, method, target)
+      end
+    rescue StandardError => e
+      log("[ERROR] Unexpected error: #{e.message}")
+      send_error_response(client, 500, "Internal Server Error: #{e.message}")
+    ensure
+      client.close unless client.closed?
     end
   end
 
+  def send_error_response(client, code, message)
+    response = "HTTP/1.1 #{code} #{http_status_message(code)}\r\n"
+    response += "Content-Type: text/plain\r\n"
+    response += "Content-Length: #{message.bytesize}\r\n"
+    response += "Connection: close\r\n\r\n"
+    response += message
+    client.write(response)
+    log("[ERROR] Sent #{code}: #{message}")
+  end
+
+  def valid_http_method?(method)
+    %w[CONNECT GET POST PUT DELETE PATCH].include?(method)
+  end
+
+  def valid_target?(target)
+    uri = URI.parse(target)
+    valid_domain?(uri.host)
+  rescue URI::InvalidURIError
+    false
+  end
+
+  def valid_domain?(domain)
+    return false unless domain
+
+    # Regex to validate domain format
+    domain =~ /\A[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\z/
+  end
+
+  def http_status_message(code)
+    {
+      400 => "Bad Request",
+      405 => "Method Not Allowed",
+      500 => "Internal Server Error",
+      501 => "Not Implemented"
+    }[code] || "Unknown Status"
+  end
+
   def handle_https_connect(client, target)
-    host, port = target.split(':')
-    port ||= 443
+      host, port = target.split(':')
+      port ||= 443
 
-    log("[HTTPS] Intercepting: #{host}:#{port}")
+      unless valid_domain?(host)
+        send_error_response(client, 400, "Invalid domain in HTTPS target: #{host}")
+        return
+      end
 
-    cert, key = generate_or_retrieve_cert(host)
+      log("[HTTPS] Intercepting: #{host}:#{port}")
 
-    ssl_context = OpenSSL::SSL::SSLContext.new
-    ssl_context.cert = cert
-    ssl_context.key = key
-    ssl_context.min_version = OpenSSL::SSL::TLS1_2_VERSION
-    ssl_context.max_version = OpenSSL::SSL::TLS1_3_VERSION
+      cert, key = generate_or_retrieve_cert(host)
 
-    client.write("HTTP/1.1 200 Connection Established\r\n\r\n")
+      ssl_context = OpenSSL::SSL::SSLContext.new
+      ssl_context.cert = cert
+      ssl_context.key = key
+      ssl_context.min_version = OpenSSL::SSL::TLS1_2_VERSION
+      ssl_context.max_version = OpenSSL::SSL::TLS1_3_VERSION
 
-    client_ssl = OpenSSL::SSL::SSLSocket.new(client, ssl_context)
-    client_ssl.sync_close = true
-    client_ssl.accept
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n")
 
-    forward_https_traffic(client_ssl, host, port)
+      client_ssl = OpenSSL::SSL::SSLSocket.new(client, ssl_context)
+      client_ssl.sync_close = true
+      client_ssl.accept
+
+      forward_https_traffic(client_ssl, host, port)
   end
 
   def forward_https_traffic(client_ssl, host, port)
@@ -149,6 +210,11 @@ class MITMProxy
 
   def handle_http_request(client, method, target)
     uri = URI(target)
+
+    unless valid_domain?(uri.host)
+      send_error_response(client, 400, "Invalid domain in HTTP target: #{uri.host}")
+      return
+    end
 
     log("[HTTP] Intercepting: #{uri}")
 
