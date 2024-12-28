@@ -1,6 +1,6 @@
 class Certificate
    class << self
-    def generate_or_retrieve_cert(host, cert_dir, ca_key)
+    def generate_or_retrieve_cert(host, cert_dir, ca_key, ca_cert)
       cert_path = File.join(cert_dir, "#{host}.crt")
       key_path = File.join(cert_dir, "#{host}.key")
   
