@@ -13,10 +13,35 @@
 # it.
 #
 # See https://rubydoc.info/gems/rspec-core/RSpec/Core/Configuration
+require 'rspec'
+require 'webmock/rspec'
+require 'simplecov'
+
+# Enable SimpleCov for test coverage
+SimpleCov.start do
+  add_filter '/spec/' # Exclude test files from coverage
+end
+
 RSpec.configure do |config|
   # rspec-expectations config goes here. You can use an alternate
   # assertion/expectation library such as wrong or the stdlib/minitest
   # assertions if you prefer.
+  # Disable external network connections except localhost
+
+  config.before(:suite) do
+    @proxy_thread = Thread.new do
+      proxy = MITMProxy.new(port: 8081, logging_enabled: false)
+      proxy.start
+    end
+    sleep 1 # Give the server time to start
+  end
+
+  config.after(:suite) do
+    @proxy_thread.kill if @proxy_thread
+  end
+
+  WebMock.disable_net_connect!(allow_localhost: true)
+
   config.expect_with :rspec do |expectations|
     # This option will default to `true` in RSpec 4. It makes the `description`
     # and `failure_message` of custom matchers include text for helper methods

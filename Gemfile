@@ -18,4 +18,6 @@ gem "bundler", "~> 2.0"
 group :development, :test do
   gem "rspec", "~> 3.12"    # Testing framework
   gem "standard", "~> 1.0"  # Code formatting and linting
+  gem 'webmock'     # Mocking HTTP/HTTPS requests
+  gem 'simplecov'   # Test coverage analysis (optional)
 end

@@ -32,6 +32,7 @@ class MITMProxy
     server = TCPServer.new(@port)
     loop do
       client = server.accept
+      next if client.nil?
       Thread.new { handle_client(client) }
     end
   end
@@ -45,16 +46,18 @@ class MITMProxy
 
   def handle_client(client)
     begin
+      return if client.nil?
+  
       request_line = client.gets
       return if request_line.nil?
-
+  
       method, target, _ = request_line.split(' ')
-
+  
       unless valid_http_method?(method)
         send_error_response(client, 405, "Method not Allowed: #{method}")
         return
       end
-
+  
       if method == 'CONNECT'
         handle_https_connect(client, target)
       else
@@ -62,11 +65,11 @@ class MITMProxy
       end
     rescue StandardError => e
       log("[ERROR] Unexpected error: #{e.message}")
-      send_error_response(client, 500, "Internal Server Error: #{e.message}")
+      send_error_response(client, 500, "Internal Server Error: #{e.message}") if client
     ensure
-      client.close unless client.closed?
+      client&.close unless client&.closed?
     end
-  end
+  end  
 
   def send_error_response(client, code, message)
     response = "HTTP/1.1 #{code} #{http_status_message(code)}\r\n"
@@ -246,6 +249,7 @@ class MITMProxy
   end
 end
 
-# Start the proxy
-proxy = MITMProxy.new(port: 8080, logging_enabled: true)
-proxy.start
+if __FILE__ == $PROGRAM_NAME
+  proxy = MITMProxy.new(port: 8080, logging_enabled: true)
+  proxy.start
+end
