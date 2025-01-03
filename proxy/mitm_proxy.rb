@@ -192,7 +192,10 @@ class MITMProxy
         log("Body: #{upstream_response.body}") if upstream_response.body
 
         client_ssl.write "HTTP/#{upstream_response.http_version} #{upstream_response.code} #{upstream_response.message}\r\n"
-        upstream_response.each_header { |key, value| client_ssl.write("#{key}: #{value}\r\n") }
+        upstream_response.each_header do |key, value|
+          log("Writing header: #{key}: #{value}")
+          client_ssl.write("#{key}: #{value}\r\n")
+        end        
         client_ssl.write("\r\n")
         client_ssl.write(upstream_response.body) if upstream_response.body
       rescue EOFError

@@ -4,6 +4,8 @@ require 'webmock/rspec'
 require 'socket'
 require 'stringio'
 require 'openssl'
+require 'uri'
+require 'net/http'
 require_relative '../proxy/certificate'
 require_relative '../proxy/mitm_proxy'
 
@@ -290,6 +292,81 @@ RSpec.describe MITMProxy do
 
         expect(proxy).to have_received(:log).with("[ERROR] Failed to establish SSL connection with client: SSL connection error")
         expect(proxy).not_to have_received(:forward_https_traffic)
+      end
+    end
+  end
+
+  describe "#forward_https_traffic" do
+    let(:host) { "example.com" }
+    let(:port) { 443 }
+    let(:mock_http) { instance_double(Net::HTTP) }
+    let(:mock_ssl_socket) { instance_double(OpenSSL::SSL::SSLSocket) }
+    let(:mock_response) { instance_double(Net::HTTPResponse, code: "200", message: "OK", body: "response_body", http_version: "1.1") }
+
+    before do
+      # Mock the SSL socket behavior
+      allow(mock_ssl_socket).to receive(:readpartial).and_return(request_data, EOFError)
+      allow(mock_ssl_socket).to receive(:write)
+      allow(mock_ssl_socket).to receive(:close)
+
+      # Mock the HTTP client and response behavior
+      allow(Net::HTTP).to receive(:new).with(host, port).and_return(mock_http)
+      allow(mock_http).to receive(:use_ssl=).with(true)
+      allow(mock_http).to receive(:verify_mode=).with(OpenSSL::SSL::VERIFY_NONE)
+      allow(mock_http).to receive(:request).and_return(mock_response)
+
+      # Properly mock each_header to yield headers as expected
+      allow(mock_response).to receive(:each_header).and_return(nil)
+      allow(mock_response).to receive(:each_header) do |&block|
+        block.call("Content-Type", "application/json") if block
+      end
+
+      # Mock other response attributes
+      allow(mock_response).to receive(:body).and_return("response_body")
+      allow(mock_response).to receive(:code).and_return("200")
+      allow(mock_response).to receive(:message).and_return("OK")
+      allow(mock_response).to receive(:http_version).and_return("1.1")
+    end
+
+    context "when handling GET requests" do
+      let(:request_data) { "GET /test HTTP/1.1\r\nHost: #{host}\r\n\r\n" }
+
+      it "forwards them correctly" do
+        # Mock the GET request behavior
+        mock_request = instance_double(Net::HTTP::Get)
+        allow(Net::HTTP::Get).to receive(:new).and_return(mock_request)
+        allow(mock_request).to receive(:[]=) # Allow setting headers on the HTTP request
+
+        # Call the method being tested
+        proxy.send(:forward_https_traffic, mock_ssl_socket, host, port)
+
+        # Validate that the correct response is written to the SSL socket
+        expect(mock_ssl_socket).to have_received(:write).with("HTTP/1.1 200 OK\r\n")
+        expect(mock_ssl_socket).to have_received(:write).with("Content-Type: application/json\r\n")
+        expect(mock_ssl_socket).to have_received(:write).with("\r\n")
+        expect(mock_ssl_socket).to have_received(:write).with("response_body")
+      end
+    end
+
+    context "when handling POST requests" do
+      let(:request_data) {"POST /test HTTP/1.1\r\nHost: #{host}\r\nContent-length: 11\r\n\r\nparam=value"}
+
+      it "modifies the body and forwards them correctly" do
+        #Mock the POST request behavior
+        mock_request = instance_double(Net::HTTP::Post)
+        allow(Net::HTTP::Post).to receive(:new).and_return(mock_request)
+        allow(mock_request).to receive(:body=)
+        allow(mock_request).to receive(:[]=)
+
+        # Call the method being tested
+        proxy.send(:forward_https_traffic, mock_ssl_socket, host, port)
+
+        # validate that the body is modified and the correct response is written to the SSL socket
+        expect(mock_request).to have_received(:body=).with("param=value&modified=true")
+        expect(mock_ssl_socket).to have_received(:write).with("HTTP/1.1 200 OK\r\n")
+        expect(mock_ssl_socket).to have_received(:write).with("Content-Type: application/json\r\n")
+        expect(mock_ssl_socket).to have_received(:write).with("\r\n")
+        expect(mock_ssl_socket).to have_received(:write).with("response_body")
       end
     end
   end
