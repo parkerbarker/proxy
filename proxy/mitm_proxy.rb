@@ -87,8 +87,6 @@ class MITMProxy
 
   def valid_domain?(domain)
     return false unless domain
-
-    # Enhanced regex for domain validation
     domain =~ /\A[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}\z/
   end
 
@@ -109,7 +107,7 @@ class MITMProxy
     unless valid_domain?(host)
       log("[ERROR] Invalid domain in HTTPS target: #{host}")
       send_error_response(client, 400, "Invalid domain in HTTPS target: #{host}")
-      return # Exit the thread for this client
+      return
     end
 
     log("[HTTPS] Intercepting: #{host}:#{port}")

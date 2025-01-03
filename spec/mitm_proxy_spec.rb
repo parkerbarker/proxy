@@ -2,6 +2,9 @@ require 'rspec'
 require 'fileutils'
 require 'webmock/rspec'
 require 'socket'
+require 'stringio'
+require 'openssl'
+require_relative '../proxy/certificate'
 require_relative '../proxy/mitm_proxy'
 
 RSpec.describe MITMProxy do
@@ -10,6 +13,9 @@ RSpec.describe MITMProxy do
   let(:proxy) { MITMProxy.new(port: port, logging_enabled: logging_enabled) }
   let(:mock_logger) {instance_double("Logger", info: nil)}
   let(:mock_client) {instance_double("TCPSocket")}
+  let(:mock_ssl_socket) {instance_double("OpenSSL::SSL::SSLSocket")}
+  let(:mock_cert) {instance_double("OpenSSL::X509::Certificate")}
+  let(:mock_key) {instance_double("OpenSSL::Pkey::RSA")}
 
   before do
     allow(Logger).to receive(:new).and_return(mock_logger)
@@ -152,5 +158,139 @@ RSpec.describe MITMProxy do
       end
     end
   end
-  
+
+  describe "#send_error_response" do
+    {
+      400 => "Bad Request",
+      405 => "Method Not Allowed",
+      500 => "Internal Server Error",
+      501 => "Not Implemented"
+    }.each do |code, message|
+      it "sends the error response for HTTP #{code}" do
+        expected_response = <<~RESPONSE
+          HTTP/1.1 #{code} #{message}\r
+          Content-Type: text/plain\r
+          Content-Length: #{message.bytesize}\r
+          Connection: close\r
+          \r
+          #{message}
+        RESPONSE
+
+        allow(mock_client).to receive(:write).with(expected_response.strip)
+        proxy.send(:send_error_response, mock_client, code, message)
+        expect(mock_client).to have_received(:write).with(expected_response.strip)
+        expect(mock_logger).to have_received(:info).with("[ERROR] Sent #{code}: #{message}")
+      end
+    end
+  end
+
+  describe "#valid_domain?" do
+    context "when the domain is valid" do
+      it "returns true for a simple domain" do
+        expect(proxy.send(:valid_domain?, "example.com")).to be_truthy
+      end
+
+      it "returns true for a sub domain" do
+        expect(proxy.send(:valid_domain?, "sub.example.com")).to be_truthy
+      end
+
+      it "returns true for a domain with hypen" do
+        expect(proxy.send(:valid_domain?, "my-example.com")).to be_truthy
+      end
+    end
+
+    context "when the domain is invalid" do
+      it "returns false for a domain without a TLD" do
+        expect(proxy.send(:valid_domain?, "example")).to be_falsey
+      end
+
+      it "returns false for a domain with special characters" do
+        expect(proxy.send(:valid_domain?, "exam$ple.com")).to be_falsey
+      end
+
+      it "returns false for an empty string" do
+        expect(proxy.send(:valid_domain?, "")).to be_falsey
+      end
+
+      it "returns false for nil input" do
+        expect(proxy.send(:valid_domain?, nil)).to be_falsey
+      end
+
+      it "returns false for a domain starting with a period" do
+        expect(proxy.send(:valid_domain?, ".example.com")).to be_falsey
+      end
+
+      it "returns false for a domain ending with a period" do
+        expect(proxy.send(:valid_domain?, "example.com.")).to be_falsey
+      end
+    end
+  end
+
+  describe "#handle_https_connect" do
+    let(:valid_target) {"example.com:443"}
+    let(:invalid_target) {"invalid_domain.com:443"}
+    let(:host) {"example.com"}
+    let(:port) {"443"}
+
+    before do
+      allow(mock_client).to receive(:write)
+      allow(mock_client).to receive(:close)
+      allow(mock_client).to receive(:closed?).and_return(false)
+      allow(OpenSSL::SSL::SSLSocket).to receive(:new).and_return(mock_ssl_socket)
+      allow(mock_ssl_socket).to receive(:sync_close=)
+      allow(mock_ssl_socket).to receive(:accept)
+      allow(mock_ssl_socket).to receive(:close)
+      allow(mock_ssl_socket).to receive(:closed?).and_return(false)
+      allow(Certificate).to receive(:generate_or_retrieve_cert).and_return([mock_cert, mock_key])
+    end
+
+    context "when domain is valid" do
+      before do
+        allow(proxy).to receive(:valid_domain?).with(host).and_return(true)
+      end
+
+      it "logs the interception, establishes a connection, and forwards traffic" do
+        expect(proxy).to receive(:log).with("[HTTPS] Intercepting: #{host}:#{port}")
+        expect(proxy).to receive(:forward_https_traffic).with(mock_ssl_socket, host, port)
+
+        proxy.send(:handle_https_connect, mock_client, valid_target)
+
+        expect(mock_client).to have_received(:write).with("HTTP/1.1 200 Connection Established\r\n\r\n")
+      end
+    end
+
+    context "when certificate generation fails" do
+      before do
+        allow(proxy).to receive(:valid_domain?).with(host).and_return(true)
+        allow(Certificate).to receive(:generate_or_retrieve_cert).and_raise(StandardError.new("Certificate error"))
+      end
+
+      it "logs an error and sends a 500 response" do
+        allow(proxy).to receive(:log)
+        allow(mock_client).to receive(:write)
+
+        proxy.send(:handle_https_connect, mock_client, valid_target)
+
+        expect(proxy).to have_received(:log).with("[ERROR] Failed to generate or retrieve certificate for #{host}: Certificate error")
+        expect(mock_client).to have_received(:write).with(/500 Internal Server Error/)
+      end
+    end
+
+    context "when SSL connection with the client fails" do
+      before do
+        allow(proxy).to receive(:valid_domain?).with(host).and_return(true)
+        allow(OpenSSL::SSL::SSLSocket).to receive(:new).and_raise(StandardError.new("SSL connection error"))
+        allow(proxy).to receive(:log)
+        allow(mock_client).to receive(:write)
+        allow(proxy).to receive(:forward_https_traffic)
+      end
+
+      it "logs an error and does not forward traffic" do
+        proxy.send(:handle_https_connect, mock_client, valid_target)
+
+        expect(proxy).to have_received(:log).with("[ERROR] Failed to establish SSL connection with client: SSL connection error")
+        expect(proxy).not_to have_received(:forward_https_traffic)
+      end
+    end
+  end
 end
