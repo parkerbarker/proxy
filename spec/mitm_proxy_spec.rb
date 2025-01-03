@@ -369,5 +369,36 @@ RSpec.describe MITMProxy do
         expect(mock_ssl_socket).to have_received(:write).with("response_body")
       end
     end
+
+    context "when an EOFError occurs" do
+      let(:request_data) { "GET /test HTTP/1.1\r\nHost: #{host}\r\n\r\n" }
+
+      before do
+        allow(mock_ssl_socket).to receive(:readpartial).and_raise(EOFError)
+      end
+
+      it "closes the SSL socket gracefully" do
+        # Call the method being tested
+        proxy.send(:forward_https_traffic, mock_ssl_socket, host, port)
+
+        # Validate that the SSL socket is closed
+        expect(mock_ssl_socket).to have_received(:close)
+      end
+
+    end
+
+    context "when an Unsupported HTTP method is used" do
+      let(:request_data) { "UNSUPPORTED /test HTTP/1.1\r\nHost: #{host}\r\n\r\n" }
+
+      it "logs an error and does not proceed" do
+        allow(proxy).to receive(:log)
+
+        # Call the method being tested
+        proxy.send(:forward_https_traffic, mock_ssl_socket, host, port)
+
+        # Validate that an error is logged
+        expect(proxy).to have_received(:log).with("[ERROR] Unsupported HTTP method: UNSUPPORTED")
+      end
+    end
   end
 end
