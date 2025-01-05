@@ -401,4 +401,75 @@ RSpec.describe MITMProxy do
       end
     end
   end
+
+  describe "#parse_request" do
+    let(:data) { "GET /index.html HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\nBody content" }
+    let(:request_line) { "GET /index.html HTTP/1.1" }
+    let(:parsed_headers) {{"Host"=>"example.com", "Connection" => "Keep-alive"}}
+    let(:body) {"Body content"}
+
+    it "parses the request line, headers, and body correctly" do
+      result = proxy.send(:parse_request, data)
+      expect(result[0]).to eq(request_line)
+      normalized_result_headers = result[1].transform_values(&:downcase)
+      normalized_expected_headers = parsed_headers.transform_values(&:downcase)
+
+      expect(normalized_result_headers).to eq(normalized_expected_headers)
+      expect(result[2]).to eq(body)
+    end
+
+    context "when the input has no body" do
+      let(:data) { "GET /index.html HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n" }
+      let(:body) { "" }
+
+      it "parses the request line and headers correctly and sets body to an empty string" do
+        result = proxy.send(:parse_request, data)
+        expect(result[0]).to eq(request_line)
+        normalized_result_headers = result[1].transform_values(&:downcase)
+        normalized_expected_headers = parsed_headers.transform_values(&:downcase)
+
+        expect(normalized_result_headers).to eq(normalized_expected_headers)
+        expect(result[2]).to eq(body)
+      end
+    end
+
+    context "when the input has no headers" do
+      let(:data) { "GET /index.html HTTP/1.1\r\n\r\nBody content" }
+      let(:parsed_headers) { {} }
+
+      it "parses the request line correctly and sets headers to an empty hash" do
+        result = proxy.send(:parse_request, data)
+        expect(result[0]).to  eq(request_line)
+        expect(result[1]).to  eq(parsed_headers)
+        expect(result[2]).to  eq(body)
+      end
+    end
+
+    context "when the input has no body and no headers" do
+      let(:data) { "GET /index.html HTTP/1.1\r\n\r\n" }
+      let(:parsed_headers) { {} }
+      let(:body) { "" }
+
+      it "parses the request line correctly and sets headers and body to empty" do
+        result = proxy.send(:parse_request, data)
+        expect(result[0]).to  eq(request_line)
+        expect(result[1]).to  eq(parsed_headers)
+        expect(result[2]).to  eq(body)
+      end
+    end
+
+    context "when the input is invalid" do
+      it "raises an error for empty input" do
+        expect { proxy.send(:parse_request, "") }.to raise_error(NoMethodError, "Invalid input data")
+      end
+
+      it "raises an error for input with no headers and no request line" do
+        expect { proxy.send(:parse_request, "\r\n\r\n") }.to raise_error(NoMethodError, "Invalid input data")
+      end
+
+      it "raises an error for input with only a body" do
+        expect { proxy.send(:parse_request, "\r\n\r\nBody content") }.to raise_error(NoMethodError, "Invalid input data")
+      end
+    end
+  end
 end

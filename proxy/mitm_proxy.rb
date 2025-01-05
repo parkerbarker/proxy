@@ -212,7 +212,11 @@ class MITMProxy
 
   def parse_request(data)
     headers, body = data.split("\r\n\r\n", 2)
+    raise NoMethodError, "Invalid input data" if headers.nil? || headers.strip.empty?
+
     request_line, *header_lines = headers.split("\r\n")
+    raise NoMethodError, "Invalid input data" if request_line.nil? || request_line.strip.empty?
+
     parsed_headers = header_lines.each_with_object({}) do |line, hash|
       key, value = line.split(': ', 2)
       hash[key] = value
