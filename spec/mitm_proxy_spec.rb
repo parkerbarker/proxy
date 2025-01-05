@@ -472,4 +472,107 @@ RSpec.describe MITMProxy do
       end
     end
   end
+
+  describe "#handle_http_request" do
+    let(:mock_client) { instance_double("Socket") }
+    let(:target) { "http://example.com/test" }
+    let(:uri) { URI(target) }
+    let(:mock_http) { instance_double(Net::HTTP) }
+    let(:mock_response) { instance_double(Net::HTTPResponse, code: "200", message: "OK", body: "response_body") }
+    let(:headers) { { "Content-Type" => "text/html", "Content-Length" => "12" } }
+
+    before do
+      allow(uri).to receive(:host).and_return("example.com")
+      allow(proxy).to receive(:valid_domain?).and_return(true)
+      allow(Net::HTTP).to receive(:new).with(uri.host, uri.port).and_return(mock_http)
+      allow(mock_http).to receive(:request).and_return(mock_response)
+      allow(mock_response).to receive(:each_header).and_return(headers.each)
+      allow(mock_client).to receive(:write)
+      allow(mock_client).to receive(:close)
+      allow(proxy).to receive(:log)
+    end
+
+    %w[get post put delete patch].each do |method|
+      context "when handling a #{method.upcase} request" do
+        let(:mock_request) { instance_double("Net::HTTP::#{method.capitalize}") }
+
+        before do
+          allow(Net::HTTP.const_get(method.capitalize)).to receive(:new).and_return(mock_request)
+          allow(mock_request).to receive(:[]=)
+        end
+
+        it "forwards the #{method.upcase} request and sends the response back to the client" do
+          proxy.send(:handle_http_request, mock_client, method, target)
+          expect(mock_client).to have_received(:write).with("HTTP/1.1 200 OK\r\n").ordered
+          expect(mock_client).to have_received(:write).with("Content-Type: text/html\r\n").ordered
+          expect(mock_client).to have_received(:write).with("Content-Length: 12\r\n").ordered
+          expect(mock_client).to have_received(:write).with("\r\n").ordered
+          expect(mock_client).to have_received(:write).with("response_body").ordered
+        end
+      end
+    end
+
+    context "when the target domain is invalid" do
+      before do
+        allow(proxy).to receive(:valid_domain?).and_return(false)
+      end
+
+      it "sends a 400 Bad Request error response to the client and logs the error" do
+        proxy.send(:handle_http_request, mock_client, "get", target)
+
+        expected_response = <<~RESPONSE.chomp
+          HTTP/1.1 400 Bad Request\r
+          Content-Type: text/plain\r
+          Content-Length: 42\r
+          Connection: close\r
+          \r
+          Invalid domain in HTTP target: example.com
+        RESPONSE
+
+        expect(mock_client).to have_received(:write).with(expected_response)
+        expect(proxy).to have_received(:log).with("[ERROR] Sent 400: Invalid domain in HTTP target: example.com")
+      end
+    end
+
+    context "when the HTTP request fails" do
+      before do
+        allow(mock_http).to receive(:request).and_raise(StandardError.new("Request error"))
+      end
+
+      it "sends a 500 Internal Server Error response to the client and logs the error" do
+        expect{
+          proxy.send(:handle_http_request, mock_client, "get", target)
+      }.not_to raise_error
+
+        expected_response = <<~RESPONSE.chomp
+          HTTP/1.1 500 Internal Server Error\r
+          Content-Type: text/plain\r
+          Content-Length: 13\r
+          Connection: close\r
+          \r
+          Request error
+        RESPONSE
+
+        expect(mock_client).to have_received(:write).with(expected_response)
+        expect(proxy).to have_received(:log).with("[ERROR] Failed to process HTTP request: Request error")
+      end
+    end
+
+    context "when the response has no body" do
+      before do
+        allow(mock_response).to receive(:body).and_return(nil)
+      end
+
+      it "forwards the response without the body" do
+        proxy.send(:handle_http_request, mock_client, "get", target)
+
+        expect(mock_client).to have_received(:write).with("HTTP/1.1 200 OK\r\n").ordered
+        headers.each do |key, value|
+          expect(mock_client).to have_received(:write).with("#{key}: #{value}\r\n").ordered
+        end
+        expect(mock_client).to have_received(:write).with("\r\n").ordered
+        expect(mock_client).not_to have_received(:write).with("response_body")
+      end
+    end
+  end
 end

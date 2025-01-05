@@ -242,13 +242,17 @@ class MITMProxy
     log("[HTTP] Request to #{uri.host}")
     log("Method: #{method}")
     log("Response Code: #{response.code}")
-    log("Response Headers: #{response.each_header.to_h}")
+    headers = response.each_header.to_h
+    log("Response Headers: #{headers}")
     log("Response Body: #{response.body}") if response.body
 
     client.write("HTTP/1.1 #{response.code} #{response.message}\r\n")
-    response.each_header { |key, value| client.write("#{key}: #{value}\r\n") }
+    headers.each { |key, value| client.write("#{key}: #{value}\r\n") }
     client.write("\r\n")
     client.write(response.body)
+  rescue StandardError => e
+    send_error_response(client, 500, e.message)
+    log("[ERROR] Failed to process HTTP request: #{e.message}")
   ensure
     client.close
   end
