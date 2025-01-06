@@ -20,4 +20,5 @@ group :development, :test do
   gem "standard", "~> 1.0"  # Code formatting and linting
   gem 'webmock'     # Mocking HTTP/HTTPS requests
   gem 'simplecov'   # Test coverage analysis (optional)
+  gem 'pry'
 end
