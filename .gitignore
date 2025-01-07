@@ -4,3 +4,4 @@ _sandbox_.rb
 .vscode
 .past
 tmp/
+coverage/

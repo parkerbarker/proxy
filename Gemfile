@@ -11,3 +11,4 @@ gem "openssl"
 gem "rspec", group: :development
 gem "minitest", group: :development
 gem "standard", group: :development
+gem "pry", group: :development
