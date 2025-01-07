@@ -1,5 +1,9 @@
 certificates/intermediate
 certificates/root
+certificates/dynamic
+coverage/
+proxy_logs.log
+proxy_logs.log.*
 _sandbox_.rb
 .vscode
 .past

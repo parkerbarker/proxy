@@ -11,12 +11,10 @@ bundle install
 
 #### Start server
 
-This can be run in a ruby session by using `irb`.
-```ruby
-require_relative "proxy/mitm_proxy"
+This can be run in a cmd.
 
-proxy = MITMProxy.new(port: 8080)
-proxy.start
+```bash
+ruby proxy/mitm_proxy.rb
 ```
 
 #### Run Tests
@@ -28,5 +26,3 @@ Tests can be run by running `rspec` command in your console.
 ```bash
 curl -x http://localhost:8080 --cacert rootCA.crt -d "param=value" -X POST https://www.example.com
 ```
-
-

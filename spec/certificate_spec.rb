@@ -1,104 +1,108 @@
-require "openssl"
-require_relative "../certificates/certificate"
+require 'rspec'
+require 'openssl'
+require 'fileutils'
+require_relative '../proxy/certificate'
 
-RSpec.describe "Certificate for Test Domain" do
-  let(:test_domain) { "testdomain.com" }
-  let(:certificates_path) { File.expand_path("../certificates", __dir__) }
-  let(:cert_path) { "#{certificates_path}/intermediate/certs/#{test_domain}.crt" }
-  let(:key_path) { "#{certificates_path}/intermediate/private/#{test_domain}.key" }
-  let(:intermediate_cert_path) { "#{certificates_path}/intermediate/certs/intermediateCA.crt" }
-  let(:root_cert_path) { "#{certificates_path}/root/rootCA.crt" }
-  # --- Core Tests ---
-  it "validates the certificate is signed by the intermediate CA" do
-    cert = OpenSSL::X509::Certificate.new(File.read(cert_path))
-    intermediate_cert = OpenSSL::X509::Certificate.new(File.read(intermediate_cert_path))
-
-    # Verify the certificate's issuer matches the intermediate CA
-    expect(cert.issuer.to_s).to eq(intermediate_cert.subject.to_s)
-
-    # Verify the certificate's signature
-    expect(cert.verify(intermediate_cert.public_key)).to be true
+RSpec.describe Certificate do
+  let(:host) { "example.com" }
+  let(:cert_dir) { File.expand_path("./tmp_certs", __dir__) }
+  let(:ca_key) { OpenSSL::PKey::RSA.new(2048) } # Corrected typo here
+  let(:ca_cert) do
+    cert = OpenSSL::X509::Certificate.new
+    cert.subject = OpenSSL::X509::Name.parse("/CN=Root CA")
+    cert.issuer = cert.subject
+    cert.public_key = ca_key.public_key
+    cert.serial = 1
+    cert.version = 2
+    cert.not_before = Time.now
+    cert.not_after = Time.now + 365 * 24 * 60 * 60
+    cert.sign(ca_key, OpenSSL::Digest::SHA256.new)
+    cert
   end
 
-  it "validates the certificate chain including the root CA" do
-    cert = OpenSSL::X509::Certificate.new(File.read(cert_path))
-    intermediate_cert = OpenSSL::X509::Certificate.new(File.read(intermediate_cert_path))
-    root_cert = OpenSSL::X509::Certificate.new(File.read(root_cert_path))
+  let(:cert_path) { File.join(cert_dir, "#{host}.crt") }
+  let(:key_path) { File.join(cert_dir, "#{host}.key") }
 
-    # Set up the certificate store with the root and intermediate CA
-    store = OpenSSL::X509::Store.new
-    store.add_cert(intermediate_cert)
-    store.add_cert(root_cert)
-
-    # Verify the chain
-    expect(store.verify(cert)).to be true
+  before do
+    FileUtils.mkdir_p(cert_dir)
   end
 
-  it "validates the certificate's extensions" do
-    cert = OpenSSL::X509::Certificate.new(File.read(cert_path))
-
-    extensions = cert.extensions.map { |ext| [ext.oid, ext.value] }.to_h
-
-    # Check key usage and other extensions
-    expect(extensions["basicConstraints"]).to eq("CA:FALSE")
-    expect(extensions["keyUsage"]).to include("Digital Signature")
-    expect(extensions["keyUsage"]).to include("Key Encipherment")
-    expect(extensions["extendedKeyUsage"]).to include("TLS Web Server Authentication")
-    expect(extensions).to include("subjectKeyIdentifier")
-    expect(extensions).to include("authorityKeyIdentifier")
+  after do
+    FileUtils.rm_rf(cert_dir)
   end
 
-  # --- Dynamic Certificate Generation ---
-  it "generates valid certificates for multiple domains dynamically" do
-    domains = ["example.com", "test.com", "anotherdomain.com"]
+  describe ".generate_or_retrieve_cert" do
+    context "when the certificate and key do not exist" do
+      it "generates a new certificate and key" do
+        cert, key = Certificate.generate_or_retrieve_cert(host, cert_dir, ca_key, ca_cert)
 
-    domains.each do |domain|
-      cert_paths = Certificate.generate(domain)
-      cert = OpenSSL::X509::Certificate.new(File.read(cert_paths[:crt]))
-      intermediate_cert = OpenSSL::X509::Certificate.new(File.read(intermediate_cert_path))
+        expect(File.exist?(cert_path)).to be true
+        expect(File.exist?(key_path)).to be true
 
-      # Check CN matches the domain
-      expect(cert.subject.to_s).to include("CN=#{domain}")
+        expect(cert).to be_a(OpenSSL::X509::Certificate)
+        expect(cert.subject.to_s).to include("CN=#{host}")
+        expect(cert.issuer.to_s).to eq(ca_cert.subject.to_s)
+        expect(cert.not_before).to be <= Time.now
+        expect(cert.not_after).to be > Time.now
 
-      # Check issuer matches the intermediate CA
-      expect(cert.issuer.to_s).to eq(intermediate_cert.subject.to_s)
-
-      # Verify the signature
-      expect(cert.verify(intermediate_cert.public_key)).to be true
+        expect(key).to be_a(OpenSSL::PKey::RSA)
+        expect(key.public_key.to_pem).to eq(cert.public_key.to_pem)
+      end
     end
-  end
 
-  # --- Edge Cases ---
-  it "raises an error for invalid domain names" do
-    invalid_domains = ["", "@example.com", "domain with spaces.com"]
+    context "when the certificate and key already exist" do
+      before do
 
-    invalid_domains.each do |domain|
-      expect { Certificate.generate(domain) }.to raise_error(ArgumentError)
+        existing_key = OpenSSL::PKey::RSA.new(2048)
+        existing_cert = OpenSSL::X509::Certificate.new
+        existing_cert.subject = OpenSSL::X509::Name.parse("/CN=#{host}")
+        existing_cert.issuer = ca_cert.subject
+        existing_cert.public_key = existing_key.public_key
+        existing_cert.serial = rand(1..100_000)
+        existing_cert.version = 2
+        existing_cert.not_before = Time.now
+        existing_cert.not_after = Time.now + 365 * 24 * 60 * 60
+        existing_cert.sign(ca_key, OpenSSL::Digest::SHA256.new)
+
+        File.write(cert_path, existing_cert.to_pem)
+        File.write(key_path, existing_key.to_pem)
+      end
+
+      it "retrieves the existing certificate and key" do
+        cert, key = Certificate.generate_or_retrieve_cert(host, cert_dir, ca_key, ca_cert)
+
+        expect(cert.to_pem).to eq(File.read(cert_path))
+        expect(key.to_pem).to eq(File.read(key_path))
+      end
     end
-  end
 
-  it "generates certificates with a valid expiration date" do
-    cert_paths = Certificate.generate("example.com")
-    cert = OpenSSL::X509::Certificate.new(File.read(cert_paths[:crt]))
+    context 'when there is an error writing the certificate or key' do
+      before do
+        allow(File).to receive(:write).and_raise(StandardError, 'File write error')
+      end
 
-    # Verify expiration is within a reasonable range (1 year)
-    expect(cert.not_after).to be > Time.now
-    expect(cert.not_after).to be < (Time.now + 366 * 24 * 60 * 60)
-  end
+      it 'raises an error' do
+        expect {
+          Certificate.generate_or_retrieve_cert(host, cert_dir, ca_key, ca_cert)
+        }.to raise_error(StandardError, 'File write error')
+      end
+    end
 
-  # --- Integration Tests ---
-  it "verifies that the generated certificate can be used in a simulated TLS handshake" do
-    cert_paths = Certificate.generate("testdomain.com")
-    cert = OpenSSL::X509::Certificate.new(File.read(cert_paths[:crt]))
-    key = OpenSSL::PKey::RSA.new(File.read(cert_paths[:key]))
+    context 'when the CA certificate or key is invalid' do
+      let(:invalid_ca_cert) { nil }
+      let(:invalid_ca_key) { nil }
 
-    # Simulate a basic TLS server using the generated certificate
-    server_context = OpenSSL::SSL::SSLContext.new
-    server_context.cert = cert
-    server_context.key = key
+      it 'raises an ArgumentError for nil CA certificate' do
+        expect {
+          Certificate.generate_or_retrieve_cert(host, cert_dir, ca_key, invalid_ca_cert)
+        }.to raise_error(ArgumentError, 'CA certificate is invalid')
+      end
 
-    # Ensure the context accepts the generated certificate
-    expect(server_context.cert).to eq(cert)
-    expect(server_context.key).to eq(key)
+      it 'raises an ArgumentError for nil CA key' do
+        expect {
+          Certificate.generate_or_retrieve_cert(host, cert_dir, invalid_ca_key, ca_cert)
+        }.to raise_error(ArgumentError, 'CA key is invalid')
+      end
+    end
   end
 end
